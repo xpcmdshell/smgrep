@@ -1,4 +1,5 @@
 use smgrep::{
+   Str,
    format::{OutputMode, create_formatter, detect_output_mode},
    types::{ChunkType, SearchResult},
 };
@@ -6,40 +7,44 @@ use smgrep::{
 fn main() {
    let results = vec![
       SearchResult {
-         path:       "src/auth.rs".to_string(),
-         content:    "pub fn authenticate_user(credentials: &Credentials) -> Result<Token> {\n    \
-                      let token = jwt::sign(credentials, &SECRET)?;\n    Ok(Token { value: token, \
-                      expires: now() + TTL })\n}"
-            .to_string(),
+         path:       "src/auth.rs".into(),
+         content:    Str::from_static(
+            "pub fn authenticate_user(credentials: &Credentials) -> Result<Token> {\n    let \
+             token = jwt::sign(credentials, &SECRET)?;\n    Ok(Token { value: token, expires: \
+             now() + TTL })\n}",
+         ),
          score:      0.95,
          start_line: 41,
          num_lines:  4,
-         chunk_type: ChunkType::Function,
-         is_anchor:  false,
+         chunk_type: Some(ChunkType::Function),
+         is_anchor:  Some(false),
       },
       SearchResult {
-         path:       "src/handlers/login.rs".to_string(),
-         content:    "async fn handle_login(req: Request) -> Result<Response> {\n    let body = \
-                      req.json::<LoginRequest>().await?;\n    let token = \
-                      authenticate_user(&body.credentials)?;\n    Ok(Response::json(token))\n}"
-            .to_string(),
+         path:       "src/handlers/login.rs".into(),
+         content:    Str::from_static(
+            "async fn handle_login(req: Request) -> Result<Response> {\n    let body = \
+             req.json::<LoginRequest>().await?;\n    let token = \
+             authenticate_user(&body.credentials)?;\n    Ok(Response::json(token))\n}",
+         ),
          score:      0.87,
          start_line: 14,
          num_lines:  5,
-         chunk_type: ChunkType::Function,
-         is_anchor:  false,
+         chunk_type: Some(ChunkType::Function),
+         is_anchor:  Some(false),
       },
       SearchResult {
-         path:       "tests/auth_test.rs".to_string(),
-         content:    "#[test]\nfn test_authenticate_valid_credentials() {\n    let creds = \
-                      Credentials::new(\"user\", \"pass\");\n    let result = \
-                      authenticate_user(&creds);\n    assert!(result.is_ok());\n}"
-            .to_string(),
+         path:       "tests/auth_test.rs".into(),
+         content:
+            Str::from_static(
+               "#[test]\nfn test_authenticate_valid_credentials() {\n    let creds = \
+                Credentials::new(\"user\", \"pass\");\n    let result = \
+                authenticate_user(&creds);\n    assert!(result.is_ok());\n}",
+            ),
          score:      0.72,
          start_line: 10,
          num_lines:  6,
-         chunk_type: ChunkType::Function,
-         is_anchor:  false,
+         chunk_type: Some(ChunkType::Function),
+         is_anchor:  Some(false),
       },
    ];
 
@@ -61,5 +66,5 @@ fn main() {
 
    println!("\n=== Auto-detect mode ===");
    let mode = detect_output_mode(false, false);
-   println!("Detected mode: {:?}", mode);
+   println!("Detected mode: {mode:?}");
 }

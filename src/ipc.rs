@@ -1,15 +1,14 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::types::SearchResponse;
+use crate::{Result, error::IpcError, types::SearchResponse};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
-   Search { query: String, limit: usize, path: Option<String>, rerank: bool },
+   Search { query: String, limit: usize, path: Option<PathBuf>, rerank: bool },
    Health,
    Shutdown,
 }
@@ -29,14 +28,6 @@ pub struct ServerStatus {
    pub files:    usize,
 }
 
-pub fn socket_dir() -> PathBuf {
-   crate::config::data_dir().join("socks")
-}
-
-pub fn socket_path(store_id: &str) -> PathBuf {
-   socket_dir().join(format!("{}.sock", store_id))
-}
-
 pub struct SocketBuffer {
    buf: SmallVec<[u8; 2048]>,
 }
@@ -44,6 +35,12 @@ pub struct SocketBuffer {
 impl Extend<u8> for &mut SocketBuffer {
    fn extend<I: IntoIterator<Item = u8>>(&mut self, iter: I) {
       self.buf.extend(iter);
+   }
+}
+
+impl Default for SocketBuffer {
+   fn default() -> Self {
+      Self::new()
    }
 }
 
@@ -58,15 +55,12 @@ impl SocketBuffer {
       T: Serialize,
    {
       self.buf.clear();
-      self.buf.resize(4, 0u8); // length reserved
-      _ = postcard::to_extend(msg, &mut *self).context("failed to serialize message")?;
+      self.buf.resize(4, 0u8);
+      _ = postcard::to_extend(msg, &mut *self).map_err(IpcError::Serialize)?;
       let payload_len = (self.buf.len() - 4) as u32;
       *self.buf.first_chunk_mut().unwrap() = payload_len.to_le_bytes();
-      writer
-         .write_all(&self.buf)
-         .await
-         .context("failed to write message")?;
-      writer.flush().await.context("failed to flush")?;
+      writer.write_all(&self.buf).await.map_err(IpcError::Write)?;
+      writer.flush().await.map_err(IpcError::Write)?;
       Ok(())
    }
 
@@ -79,18 +73,18 @@ impl SocketBuffer {
       reader
          .read_exact(&mut len_buf)
          .await
-         .context("failed to read length")?;
+         .map_err(IpcError::Read)?;
       let len = u32::from_le_bytes(len_buf) as usize;
 
       if len > 16 * 1024 * 1024 {
-         anyhow::bail!("message too large: {} bytes", len);
+         return Err(IpcError::MessageTooLarge(len).into());
       }
 
       self.buf.resize(len, 0u8);
       reader
          .read_exact(self.buf.as_mut_slice())
          .await
-         .context("failed to read payload")?;
-      postcard::from_bytes(&self.buf).context("failed to deserialize message")
+         .map_err(IpcError::Read)?;
+      postcard::from_bytes(&self.buf).map_err(|e| IpcError::Deserialize(e).into())
    }
 }

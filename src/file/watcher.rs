@@ -22,7 +22,7 @@ impl FileWatcher {
       root: PathBuf,
       ignore_patterns: IgnorePatterns,
       on_changes: F,
-   ) -> anyhow::Result<Self>
+   ) -> crate::Result<Self>
    where
       F: Fn(Vec<(PathBuf, WatchAction)>) + Send + 'static,
    {

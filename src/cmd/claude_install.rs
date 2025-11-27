@@ -1,12 +1,15 @@
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::{
+   path::PathBuf,
+   process::{Command, Stdio},
+};
 
-use anyhow::{Context, Result, bail};
 use console::style;
 
+use crate::{Result, error::Error};
+
 fn find_smgrep_root() -> Result<PathBuf> {
-   let exe = std::env::current_exe().context("failed to get current executable path")?;
-   let exe_dir = exe.parent().context("executable has no parent directory")?;
+   let exe = std::env::current_exe()?;
+   let exe_dir = exe.parent().unwrap_or(exe.as_path());
 
    let candidates = [
       exe_dir.to_path_buf(),
@@ -18,18 +21,10 @@ fn find_smgrep_root() -> Result<PathBuf> {
    for candidate in &candidates {
       let marketplace = candidate.join(".claude-plugin/marketplace.json");
       if marketplace.exists() {
-         return Ok(candidate.canonicalize().context("failed to canonicalize path")?);
+         return Ok(candidate.canonicalize()?);
       }
    }
-
-   bail!(
-      "smgrep root directory not found (looking for .claude-plugin/marketplace.json). searched:\n{}",
-      candidates
-         .iter()
-         .map(|p| format!("  • {}", p.display()))
-         .collect::<Vec<_>>()
-         .join("\n")
-   )
+   Ok(exe_dir.to_path_buf())
 }
 
 fn run_claude_command(args: &[&str]) -> Result<()> {
@@ -39,10 +34,10 @@ fn run_claude_command(args: &[&str]) -> Result<()> {
       .stdout(Stdio::inherit())
       .stderr(Stdio::inherit())
       .status()
-      .context("failed to execute claude command")?;
+      .map_err(Error::ClaudeSpawn)?;
 
    if !status.success() {
-      bail!("claude exited with code {}", status.code().unwrap_or(-1));
+      return Err(Error::ClaudeCommand(status.code().unwrap_or(-1)));
    }
 
    Ok(())
@@ -51,7 +46,9 @@ fn run_claude_command(args: &[&str]) -> Result<()> {
 pub async fn execute() -> Result<()> {
    println!(
       "{}",
-      style("Installing smgrep plugin for Claude Code...").cyan().bold()
+      style("Installing smgrep plugin for Claude Code...")
+         .cyan()
+         .bold()
    );
 
    let smgrep_root = find_smgrep_root()?;
@@ -63,7 +60,7 @@ pub async fn execute() -> Result<()> {
    match run_claude_command(&["plugin", "marketplace", "add", &root_path]) {
       Ok(()) => println!("{}", style("✓ Added smgrep marketplace").green()),
       Err(e) => {
-         eprintln!("{}", style(format!("✗ Failed to add marketplace: {}", e)).red());
+         eprintln!("{}", style(format!("✗ Failed to add marketplace: {e}")).red());
          print_troubleshooting();
          return Err(e);
       },
@@ -73,7 +70,7 @@ pub async fn execute() -> Result<()> {
    match run_claude_command(&["plugin", "install", "smgrep"]) {
       Ok(()) => println!("{}", style("✓ Installed smgrep plugin").green()),
       Err(e) => {
-         eprintln!("{}", style(format!("✗ Failed to install plugin: {}", e)).red());
+         eprintln!("{}", style(format!("✗ Failed to install plugin: {e}")).red());
          print_troubleshooting();
          return Err(e);
       },

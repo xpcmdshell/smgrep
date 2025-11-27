@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
+
+use crate::{Str, meta::FileHash};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -14,25 +17,27 @@ pub enum ChunkType {
    Other,
 }
 
+pub type ContextVec = SmallVec<[Str; 4]>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chunk {
-   pub content:     String,
+   pub content:     Str,
    pub start_line:  usize,
    pub start_col:   usize,
    pub end_line:    usize,
    pub chunk_type:  Option<ChunkType>,
-   pub context:     Vec<String>,
+   pub context:     ContextVec,
    pub chunk_index: Option<i32>,
    pub is_anchor:   Option<bool>,
 }
 
 impl Chunk {
    pub fn new(
-      content: String,
+      content: Str,
       start_line: usize,
       end_line: usize,
       chunk_type: ChunkType,
-      context: Vec<String>,
+      context: &[Str],
    ) -> Self {
       Self {
          content,
@@ -40,13 +45,13 @@ impl Chunk {
          start_col: 0,
          end_line,
          chunk_type: Some(chunk_type),
-         context,
+         context: context.iter().cloned().collect(),
          chunk_index: None,
          is_anchor: Some(false),
       }
    }
 
-   pub fn with_col(mut self, col: usize) -> Self {
+   pub const fn with_col(mut self, col: usize) -> Self {
       self.start_col = col;
       self
    }
@@ -55,31 +60,31 @@ impl Chunk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreparedChunk {
    pub id:           String,
-   pub path:         String,
-   pub hash:         String,
-   pub content:      String,
+   pub path:         PathBuf,
+   pub hash:         FileHash,
+   pub content:      Str,
    pub start_line:   u32,
    pub end_line:     u32,
    pub chunk_index:  Option<u32>,
    pub is_anchor:    Option<bool>,
    pub chunk_type:   Option<ChunkType>,
-   pub context_prev: Option<String>,
-   pub context_next: Option<String>,
+   pub context_prev: Option<Str>,
+   pub context_next: Option<Str>,
 }
 
 #[derive(Debug, Clone)]
 pub struct VectorRecord {
    pub id:            String,
-   pub path:          String,
-   pub hash:          String,
-   pub content:       String,
+   pub path:          PathBuf,
+   pub hash:          FileHash,
+   pub content:       Str,
    pub start_line:    u32,
    pub end_line:      u32,
    pub chunk_index:   Option<u32>,
    pub is_anchor:     Option<bool>,
    pub chunk_type:    Option<ChunkType>,
-   pub context_prev:  Option<String>,
-   pub context_next:  Option<String>,
+   pub context_prev:  Option<Str>,
+   pub context_next:  Option<Str>,
    pub vector:        Vec<f32>,
    pub colbert:       Vec<u8>,
    pub colbert_scale: f64,
@@ -87,8 +92,8 @@ pub struct VectorRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
-   pub path:       String,
-   pub content:    String,
+   pub path:       PathBuf,
+   pub content:    Str,
    pub score:      f32,
    pub start_line: u32,
    pub num_lines:  u32,
@@ -122,5 +127,5 @@ pub struct SyncProgress {
    pub processed:    usize,
    pub indexed:      usize,
    pub total:        usize,
-   pub current_file: Option<String>,
+   pub current_file: Option<Str>,
 }

@@ -53,17 +53,14 @@ pub fn get_semantic_tags(result: &SearchResult) -> Vec<&'static str> {
    use crate::types::ChunkType;
    let mut tags = Vec::new();
 
-   match result.chunk_type {
-      Some(ChunkType::Function)
-      | Some(ChunkType::Class)
-      | Some(ChunkType::Interface)
-      | Some(ChunkType::TypeAlias) => {
-         tags.push("Definition");
-      },
-      _ => {},
+   if let Some(
+      ChunkType::Function | ChunkType::Class | ChunkType::Interface | ChunkType::TypeAlias,
+   ) = result.chunk_type
+   {
+      tags.push("Definition");
    }
 
-   let path_str = result.path.to_lowercase();
+   let path_str = result.path.to_string_lossy().to_lowercase();
    if path_str.contains("test") || path_str.contains("spec") {
       tags.push("Test");
    }
@@ -119,11 +116,16 @@ pub fn detect_language(path: &Path) -> Option<&'static str> {
 
 pub fn format_chunk_text(context: &[String], file_path: &str, content: &str) -> String {
    let mut breadcrumb = context.to_vec();
-   let file_label = format!("File: {}", if file_path.is_empty() { "unknown" } else { file_path });
+   let file_label = format!(
+      "File: {}",
+      if file_path.is_empty() {
+         "unknown"
+      } else {
+         file_path
+      }
+   );
 
-   let has_file_label = breadcrumb
-      .iter()
-      .any(|entry| entry.starts_with("File: "));
+   let has_file_label = breadcrumb.iter().any(|entry| entry.starts_with("File: "));
 
    if !has_file_label {
       breadcrumb.insert(0, file_label.clone());
@@ -135,5 +137,5 @@ pub fn format_chunk_text(context: &[String], file_path: &str, content: &str) -> 
       breadcrumb.join(" > ")
    };
 
-   format!("{}\n---\n{}", header, content)
+   format!("{header}\n---\n{content}")
 }

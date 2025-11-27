@@ -2,10 +2,7 @@ use smgrep::format::format_chunk_text;
 
 #[test]
 fn test_format_chunk_text_with_context() {
-   let context = vec![
-      "class UserService".to_string(),
-      "method authenticate".to_string(),
-   ];
+   let context = vec!["class UserService".to_string(), "method authenticate".to_string()];
    let file_path = "src/auth.rs";
    let content = "pub fn authenticate() {\n    verify_token()\n}";
 
@@ -20,10 +17,7 @@ fn test_format_chunk_text_with_context() {
 
 #[test]
 fn test_format_chunk_text_with_file_label_already_present() {
-   let context = vec![
-      "File: src/lib.rs".to_string(),
-      "module network".to_string(),
-   ];
+   let context = vec!["File: src/lib.rs".to_string(), "module network".to_string()];
    let file_path = "src/lib.rs";
    let content = "pub mod network;";
 

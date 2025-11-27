@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use git2::Repository;
 use sha2::{Digest, Sha256};
 
-use crate::error::{Result, SmgrepError};
+use crate::error::{Error, Result};
 
 pub fn is_git_repo(path: &Path) -> bool {
    Repository::open(path).is_ok()
@@ -24,13 +24,11 @@ pub fn get_remote_url(repo: &Repository) -> Option<String> {
 
 pub fn get_tracked_files(repo: &Repository) -> Result<Vec<PathBuf>> {
    let mut files = Vec::new();
-   let index = repo
-      .index()
-      .map_err(|e| SmgrepError::Git(format!("failed to read index: {}", e)))?;
+   let index = repo.index().map_err(Error::ReadIndex)?;
 
    let workdir = repo
       .workdir()
-      .ok_or_else(|| SmgrepError::Git("repository has no working directory".to_string()))?;
+      .ok_or_else(|| Error::NoWorkingDirectory(repo.path().to_path_buf()))?;
 
    for entry in index.iter() {
       let path_bytes = entry.path.as_slice();
@@ -46,7 +44,7 @@ pub fn get_tracked_files(repo: &Repository) -> Result<Vec<PathBuf>> {
 }
 
 pub fn resolve_store_id(path: &Path) -> Result<String> {
-   let abs_path = path.canonicalize().map_err(SmgrepError::Io)?;
+   let abs_path = path.canonicalize()?;
 
    if let Ok(repo) = Repository::open(&abs_path)
       && let Some(remote_url) = get_remote_url(&repo)
@@ -89,7 +87,7 @@ fn extract_owner_repo(url: &str) -> Option<String> {
       let owner = &url[path_before + 1..path_start];
       let repo = &url[path_start + 1..];
       if !owner.is_empty() && !repo.is_empty() {
-         return Some(format!("{}-{}", owner, repo));
+         return Some(format!("{owner}-{repo}"));
       }
    }
 

@@ -3,12 +3,16 @@ use std::{
    path::PathBuf,
 };
 
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::net::UnixStream;
 
-use crate::ipc::{self, Request, Response, SocketBuffer};
+use crate::{
+   Result,
+   error::Error,
+   git,
+   ipc::{Request, Response, SocketBuffer},
+   usock,
+};
 
 #[derive(Deserialize)]
 struct JsonRpcRequest {
@@ -37,33 +41,31 @@ struct JsonRpcError {
 }
 
 impl JsonRpcResponse {
-   fn success(id: Value, result: Value) -> Self {
+   const fn success(id: Value, result: Value) -> Self {
       Self { jsonrpc: "2.0", id, result: Some(result), error: None }
    }
 
-   fn error(id: Value, code: i32, message: String) -> Self {
+   const fn error(id: Value, code: i32, message: String) -> Self {
       Self { jsonrpc: "2.0", id, result: None, error: Some(JsonRpcError { code, message }) }
    }
 }
 
 struct DaemonConn {
-   stream: UnixStream,
+   stream: usock::Stream,
    buffer: SocketBuffer,
    cwd:    PathBuf,
 }
 
 impl DaemonConn {
    async fn connect(cwd: PathBuf) -> Result<Self> {
-      let store_id = crate::git::resolve_store_id(&cwd)?;
-      let socket_path = ipc::socket_path(&store_id);
+      let store_id = git::resolve_store_id(&cwd)?;
 
-      let stream = match UnixStream::connect(&socket_path).await {
-         Ok(s) => s,
-         Err(_) => {
-            spawn_daemon(&cwd)?;
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            UnixStream::connect(&socket_path).await?
-         },
+      let stream = if let Ok(s) = usock::Stream::connect(&store_id).await {
+         s
+      } else {
+         spawn_daemon(&cwd)?;
+         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+         usock::Stream::connect(&store_id).await?
       };
 
       Ok(Self { stream, buffer: SocketBuffer::new(), cwd })
@@ -73,7 +75,7 @@ impl DaemonConn {
       let request = Request::Search {
          query: query.to_string(),
          limit,
-         path: Some(self.cwd.to_string_lossy().to_string()),
+         path: Some(self.cwd.clone()),
          rerank: true,
       };
 
@@ -84,19 +86,19 @@ impl DaemonConn {
          Response::Search(search_response) => {
             let mut output = String::new();
             for r in search_response.results {
-               output.push_str(&format!("{}:{}\n", r.path, r.start_line));
+               output.push_str(&format!("{}:{}\n", r.path.display(), r.start_line));
                for line in r.content.lines().take(10) {
-                  output.push_str(&format!("  {}\n", line));
+                  output.push_str(&format!("  {line}\n"));
                }
                output.push('\n');
             }
             if output.is_empty() {
-               output = format!("No results found for '{}'", query);
+               output = format!("No results found for '{query}'");
             }
             Ok(output)
          },
-         Response::Error { message } => anyhow::bail!("Search failed: {}", message),
-         _ => anyhow::bail!("Unexpected response"),
+         Response::Error { message } => Err(Error::Server { op: "search", reason: message }),
+         _ => Err(Error::UnexpectedResponse("search")),
       }
    }
 }
@@ -110,7 +112,7 @@ pub async fn execute() -> Result<()> {
    let mut conn: Option<DaemonConn> = None;
 
    for line in stdin.lock().lines() {
-      let line = line.context("failed to read line")?;
+      let line = line?;
       if line.is_empty() {
          continue;
       }
@@ -118,9 +120,8 @@ pub async fn execute() -> Result<()> {
       let request: JsonRpcRequest = match serde_json::from_str(&line) {
          Ok(r) => r,
          Err(e) => {
-            let response =
-               JsonRpcResponse::error(Value::Null, -32700, format!("Parse error: {}", e));
-            writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
+            let response = JsonRpcResponse::error(Value::Null, -32700, format!("Parse error: {e}"));
+            serde_json::to_writer(&mut stdout, &response)?;
             stdout.flush()?;
             continue;
          },
@@ -133,7 +134,7 @@ pub async fn execute() -> Result<()> {
          Err(e) => JsonRpcResponse::error(id, -32603, e.to_string()),
       };
 
-      writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
+      serde_json::to_writer(&mut stdout, &response)?;
       stdout.flush()?;
    }
 
@@ -206,11 +207,11 @@ async fn handle_request(
                   }]
                }))
             },
-            _ => anyhow::bail!("Unknown tool: {}", name),
+            _ => Err(Error::McpUnknownTool(name.to_string())),
          }
       },
 
-      _ => anyhow::bail!("Unknown method: {}", request.method),
+      _ => Err(Error::McpUnknownMethod(request.method)),
    }
 }
 
@@ -226,13 +227,12 @@ async fn do_search_with_retry(
    }
 
    // Try search, reconnect on failure
-   match conn.as_mut().unwrap().search(query, limit).await {
-      Ok(result) => Ok(result),
-      Err(_) => {
-         // Connection failed, reconnect and retry once
-         *conn = Some(DaemonConn::connect(cwd.clone()).await?);
-         conn.as_mut().unwrap().search(query, limit).await
-      },
+   if let Ok(result) = conn.as_mut().unwrap().search(query, limit).await {
+      Ok(result)
+   } else {
+      // Connection failed, reconnect and retry once
+      *conn = Some(DaemonConn::connect(cwd.clone()).await?);
+      conn.as_mut().unwrap().search(query, limit).await
    }
 }
 

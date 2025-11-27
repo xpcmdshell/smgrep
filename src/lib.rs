@@ -1,5 +1,5 @@
 pub mod chunker;
-pub mod commands;
+pub mod cmd;
 pub mod config;
 pub mod embed;
 pub mod error;
@@ -10,9 +10,12 @@ pub mod grammar;
 pub mod ipc;
 pub mod meta;
 pub mod search;
+mod sstr;
 pub mod store;
 pub mod sync;
 pub mod types;
+pub mod usock;
 
-pub use error::{Result, SmgrepError};
+pub use error::{Error, Result};
+pub use sstr::Str;
 pub use types::*;

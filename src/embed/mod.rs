@@ -6,7 +6,7 @@ use std::sync::Arc;
 pub use candle::CandleEmbedder;
 pub use worker::EmbedWorker;
 
-use crate::error::Result;
+use crate::{Str, error::Result};
 
 #[derive(Debug, Clone)]
 pub struct HybridEmbedding {
@@ -23,14 +23,14 @@ pub struct QueryEmbedding {
 
 #[async_trait::async_trait]
 pub trait Embedder: Send + Sync {
-   async fn compute_hybrid(&self, texts: &[String]) -> Result<Vec<HybridEmbedding>>;
+   async fn compute_hybrid(&self, texts: &[Str]) -> Result<Vec<HybridEmbedding>>;
    async fn encode_query(&self, text: &str) -> Result<QueryEmbedding>;
    fn is_ready(&self) -> bool;
 }
 
 #[async_trait::async_trait]
 impl<T: Embedder + ?Sized> Embedder for Arc<T> {
-   async fn compute_hybrid(&self, texts: &[String]) -> Result<Vec<HybridEmbedding>> {
+   async fn compute_hybrid(&self, texts: &[Str]) -> Result<Vec<HybridEmbedding>> {
       (**self).compute_hybrid(texts).await
    }
 

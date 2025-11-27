@@ -1,11 +1,12 @@
 use std::{fs, path::PathBuf, time::SystemTime};
 
-use anyhow::{Context, Result};
 use console::style;
+
+use crate::{Result, error::ConfigError};
 
 pub async fn execute() -> Result<()> {
    let home = directories::UserDirs::new()
-      .context("failed to get user directories")?
+      .ok_or(ConfigError::GetUserDirectories)?
       .home_dir()
       .to_path_buf();
 
@@ -102,7 +103,7 @@ fn format_size(bytes: u64) -> String {
    const GB: u64 = MB * 1024;
 
    if bytes < KB {
-      format!("{} B", bytes)
+      format!("{bytes} B")
    } else if bytes < MB {
       format!("{:.1} KB", bytes as f64 / KB as f64)
    } else if bytes < GB {
@@ -122,11 +123,11 @@ fn format_time_ago(time: SystemTime) -> String {
    let days = hours / 24;
 
    if days > 0 {
-      format!("{}d ago", days)
+      format!("{days}d ago")
    } else if hours > 0 {
-      format!("{}h ago", hours)
+      format!("{hours}h ago")
    } else if minutes > 0 {
-      format!("{}m ago", minutes)
+      format!("{minutes}m ago")
    } else {
       "just now".to_string()
    }

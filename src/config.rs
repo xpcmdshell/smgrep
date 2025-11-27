@@ -12,30 +12,30 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-   pub dense_model: String,
+   pub dense_model:   String,
    pub colbert_model: String,
-   pub dense_dim: usize,
-   pub colbert_dim: usize,
+   pub dense_dim:     usize,
+   pub colbert_dim:   usize,
 
-   pub query_prefix: String,
-   pub dense_max_length: usize,
+   pub query_prefix:       String,
+   pub dense_max_length:   usize,
    pub colbert_max_length: usize,
    pub default_batch_size: usize,
-   pub max_batch_size: usize,
-   pub max_threads: usize,
+   pub max_batch_size:     usize,
+   pub max_threads:        usize,
 
-   pub port: u16,
-   pub idle_timeout_secs: u64,
+   pub port:                     u16,
+   pub idle_timeout_secs:        u64,
    pub idle_check_interval_secs: u64,
-   pub worker_timeout_ms: u64,
+   pub worker_timeout_ms:        u64,
 
-   pub low_impact: bool,
-   pub disable_gpu: bool,
-   pub fast_mode: bool,
+   pub low_impact:      bool,
+   pub disable_gpu:     bool,
+   pub fast_mode:       bool,
    pub profile_enabled: bool,
-   pub skip_meta_save: bool,
-   pub debug_models: bool,
-   pub debug_embed: bool,
+   pub skip_meta_save:  bool,
+   pub debug_models:    bool,
+   pub debug_embed:     bool,
 }
 
 impl Default for Config {
@@ -68,11 +68,26 @@ impl Default for Config {
 
 impl Config {
    pub fn load() -> Self {
-      Figment::from(Serialized::defaults(Config::default()))
-         .merge(Toml::file(config_file_path()))
+      let config_path = config_file_path();
+      if !config_path.exists() {
+         Self::create_default_config(&config_path);
+      }
+
+      Figment::from(Serialized::defaults(Self::default()))
+         .merge(Toml::file(config_path))
          .merge(Env::prefixed("SMGREP_").lowercase(false))
          .extract()
          .unwrap_or_default()
+   }
+
+   fn create_default_config(path: &std::path::Path) {
+      if let Some(parent) = path.parent() {
+         let _ = std::fs::create_dir_all(parent);
+      }
+      let default_config = Self::default();
+      if let Ok(toml) = toml::to_string_pretty(&default_config) {
+         let _ = std::fs::write(path, toml);
+      }
    }
 
    pub fn batch_size(&self) -> usize {

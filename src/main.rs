@@ -1,24 +1,26 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::LazyLock};
 
-use anyhow::Result;
 use clap::{Parser, Subcommand};
-use smgrep::commands;
+use smgrep::{Result, cmd};
+use tracing::Level;
+use tracing_subscriber::EnvFilter;
 
-fn version_string() -> &'static str {
+static VERSION_STRING: LazyLock<String> = LazyLock::new(|| {
    const VERSION: &str = env!("CARGO_PKG_VERSION");
    const GIT_HASH: &str = env!("GIT_HASH");
    const GIT_TAG: &str = env!("GIT_TAG");
    const GIT_DIRTY: &str = env!("GIT_DIRTY");
 
-   static VERSION_STRING: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-   VERSION_STRING.get_or_init(|| {
-      let dirty = if GIT_DIRTY == "true" { "-dirty" } else { "" };
-      if GIT_TAG.is_empty() {
-         format!("{VERSION} ({GIT_HASH}{dirty})")
-      } else {
-         format!("{VERSION} ({GIT_TAG}, {GIT_HASH}{dirty})")
-      }
-   })
+   let dirty = if GIT_DIRTY == "true" { "-dirty" } else { "" };
+   if GIT_TAG.is_empty() {
+      format!("{VERSION} ({GIT_HASH}{dirty})")
+   } else {
+      format!("{VERSION} ({GIT_TAG}, {GIT_HASH}{dirty})")
+   }
+});
+
+fn version_string() -> &'static str {
+   &VERSION_STRING
 }
 
 #[derive(Parser)]
@@ -30,14 +32,15 @@ struct Cli {
    store: Option<String>,
 
    #[command(subcommand)]
-   command: Option<Commands>,
+   command: Option<Cmd>,
 
    #[arg(trailing_var_arg = true)]
    query: Vec<String>,
 }
 
 #[derive(Subcommand)]
-enum Commands {
+enum Cmd {
+   #[command(about = "Search indexed code semantically")]
    Search {
       #[arg(help = "Search query")]
       query: String,
@@ -82,6 +85,7 @@ enum Commands {
       plain: bool,
    },
 
+   #[command(about = "Index a directory for semantic search")]
    Index {
       #[arg(short = 'p', long, help = "Directory to index (default: cwd)")]
       path: Option<PathBuf>,
@@ -93,55 +97,58 @@ enum Commands {
       reset: bool,
    },
 
+   #[command(about = "Start a background daemon for faster searches")]
    Serve {
       #[arg(long, help = "Directory to serve (default: cwd)")]
       path: Option<PathBuf>,
    },
 
+   #[command(about = "Stop the daemon for a directory")]
    Stop {
       #[arg(long, help = "Directory of server to stop (default: cwd)")]
       path: Option<PathBuf>,
    },
 
-   #[command(name = "stop-all")]
+   #[command(name = "stop-all", about = "Stop all running daemons")]
    StopAll,
 
+   #[command(about = "Show status of running daemons")]
    Status,
 
+   #[command(about = "Download and configure embedding models")]
    Setup,
 
+   #[command(about = "Check system configuration and dependencies")]
    Doctor,
 
+   #[command(about = "List indexed files in a directory")]
    List,
 
-   #[command(name = "claude-install")]
+   #[command(name = "claude-install", about = "Install smgrep as a Claude Code MCP server")]
    ClaudeInstall,
 
-   #[command(name = "mcp")]
+   #[command(name = "mcp", about = "Run as an MCP server (stdio transport)")]
    Mcp,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
    tracing_subscriber::fmt()
-      .with_env_filter(
-         tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive(tracing::Level::WARN.into()),
-      )
+      .with_env_filter(EnvFilter::from_default_env().add_directive(Level::WARN.into()))
       .init();
 
    let cli = Cli::parse();
 
    if cli.command.is_none() && !cli.query.is_empty() {
       let query = cli.query.join(" ");
-      return commands::search::execute(
+      return cmd::search::execute(
          query, None, 10, 1, false, false, false, false, false, false, false, false, cli.store,
       )
       .await;
    }
 
    match cli.command {
-      Some(Commands::Search {
+      Some(Cmd::Search {
          query,
          path,
          max,
@@ -155,24 +162,24 @@ async fn main() -> Result<()> {
          no_rerank,
          plain,
       }) => {
-         commands::search::execute(
+         cmd::search::execute(
             query, path, max, per_file, content, compact, scores, sync, dry_run, json, no_rerank,
             plain, cli.store,
          )
          .await
       },
-      Some(Commands::Index { path, dry_run, reset }) => {
-         commands::index::execute(path, dry_run, reset, cli.store).await
+      Some(Cmd::Index { path, dry_run, reset }) => {
+         cmd::index::execute(path, dry_run, reset, cli.store).await
       },
-      Some(Commands::Serve { path }) => commands::serve::execute(path, cli.store).await,
-      Some(Commands::Stop { path }) => commands::stop::execute(path).await,
-      Some(Commands::StopAll) => commands::stop_all::execute().await,
-      Some(Commands::Status) => commands::status::execute().await,
-      Some(Commands::Setup) => commands::setup::execute().await,
-      Some(Commands::Doctor) => commands::doctor::execute().await,
-      Some(Commands::List) => commands::list::execute().await,
-      Some(Commands::ClaudeInstall) => commands::claude_install::execute().await,
-      Some(Commands::Mcp) => commands::mcp::execute().await,
+      Some(Cmd::Serve { path }) => cmd::serve::execute(path, cli.store).await,
+      Some(Cmd::Stop { path }) => cmd::stop::execute(path).await,
+      Some(Cmd::StopAll) => cmd::stop_all::execute().await,
+      Some(Cmd::Status) => cmd::status::execute().await,
+      Some(Cmd::Setup) => cmd::setup::execute().await,
+      Some(Cmd::Doctor) => cmd::doctor::execute(),
+      Some(Cmd::List) => cmd::list::execute().await,
+      Some(Cmd::ClaudeInstall) => cmd::claude_install::execute().await,
+      Some(Cmd::Mcp) => cmd::mcp::execute().await,
       None => {
          eprintln!("No command or query provided. Use --help for usage information.");
          std::process::exit(1);

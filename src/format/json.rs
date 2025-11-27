@@ -22,11 +22,13 @@ struct JsonResult {
 
 impl From<&SearchResult> for JsonResult {
    fn from(result: &SearchResult) -> Self {
-      let chunk_type = format!("{:?}", result.chunk_type).to_lowercase();
+      let chunk_type = result
+         .chunk_type
+         .map_or_else(String::new, |ct| format!("{ct:?}").to_lowercase());
 
       Self {
-         path: result.path.clone(),
-         content: result.content.clone(),
+         path: result.path.display().to_string(),
+         content: result.content.to_string(),
          score: result.score,
          chunk_type,
          start_line: result.start_line,
@@ -58,8 +60,8 @@ mod tests {
    fn test_json_formatter() {
       let results = vec![
          SearchResult {
-            path:       "src/main.rs".to_string(),
-            content:    "fn main() {}".to_string(),
+            path:       "src/main.rs".into(),
+            content:    "fn main() {}".into(),
             score:      0.95,
             start_line: 10,
             num_lines:  1,
@@ -67,8 +69,8 @@ mod tests {
             is_anchor:  Some(false),
          },
          SearchResult {
-            path:       "src/lib.rs".to_string(),
-            content:    "pub fn test() {}".to_string(),
+            path:       "src/lib.rs".into(),
+            content:    "pub fn test() {}".into(),
             score:      0.87,
             start_line: 5,
             num_lines:  1,

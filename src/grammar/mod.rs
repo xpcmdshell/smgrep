@@ -1,32 +1,30 @@
 use std::{
    collections::HashMap,
-   fs,
+   fs, io,
    path::{Path, PathBuf},
 };
 
 use parking_lot::RwLock;
 use tree_sitter::{Language, Parser, WasmStore, wasmtime};
 
-use crate::error::{Result, SmgrepError};
+use crate::error::{ChunkerError, ConfigError, Error, Result};
 
 pub const GRAMMAR_URLS: &[(&str, &str)] = &[
-   ("typescript", "https://github.com/nicholasjchua/tree-sitter-typescript/releases/download/v0.25.5/tree-sitter-typescript.wasm"),
-   ("tsx", "https://github.com/nicholasjchua/tree-sitter-typescript/releases/download/v0.25.5/tree-sitter-tsx.wasm"),
-   ("python", "https://github.com/nicholasjchua/tree-sitter-python/releases/download/v0.25.0/tree-sitter-python.wasm"),
-   ("go", "https://github.com/nicholasjchua/tree-sitter-go/releases/download/v0.25.0/tree-sitter-go.wasm"),
-   ("rust", "https://github.com/nicholasjchua/tree-sitter-rust/releases/download/v0.25.0/tree-sitter-rust.wasm"),
-   ("javascript", "https://github.com/nicholasjchua/tree-sitter-javascript/releases/download/v0.25.0/tree-sitter-javascript.wasm"),
-   ("c", "https://github.com/nicholasjchua/tree-sitter-c/releases/download/v0.25.1/tree-sitter-c.wasm"),
-   ("cpp", "https://github.com/nicholasjchua/tree-sitter-cpp/releases/download/v0.25.0/tree-sitter-cpp.wasm"),
-   ("java", "https://github.com/nicholasjchua/tree-sitter-java/releases/download/v0.25.0/tree-sitter-java.wasm"),
-   ("ruby", "https://github.com/nicholasjchua/tree-sitter-ruby/releases/download/v0.25.0/tree-sitter-ruby.wasm"),
-   ("php", "https://github.com/nicholasjchua/tree-sitter-php/releases/download/v0.25.0/tree-sitter-php.wasm"),
-   ("swift", "https://github.com/nicholasjchua/tree-sitter-swift/releases/download/v0.25.0/tree-sitter-swift.wasm"),
-   ("html", "https://github.com/nicholasjchua/tree-sitter-html/releases/download/v0.25.0/tree-sitter-html.wasm"),
-   ("css", "https://github.com/nicholasjchua/tree-sitter-css/releases/download/v0.25.0/tree-sitter-css.wasm"),
-   ("bash", "https://github.com/nicholasjchua/tree-sitter-bash/releases/download/v0.25.0/tree-sitter-bash.wasm"),
-   ("json", "https://github.com/nicholasjchua/tree-sitter-json/releases/download/v0.25.0/tree-sitter-json.wasm"),
-   ("yaml", "https://github.com/nicholasjchua/tree-sitter-yaml/releases/download/v0.25.0/tree-sitter-yaml.wasm"),
+    ("typescript", "https://github.com/tree-sitter/tree-sitter-typescript/releases/latest/download/tree-sitter-typescript.wasm"),
+    ("tsx",        "https://github.com/tree-sitter/tree-sitter-typescript/releases/latest/download/tree-sitter-tsx.wasm"),
+    ("python",     "https://github.com/tree-sitter/tree-sitter-python/releases/latest/download/tree-sitter-python.wasm"),
+    ("go",         "https://github.com/tree-sitter/tree-sitter-go/releases/latest/download/tree-sitter-go.wasm"),
+    ("rust",       "https://github.com/tree-sitter/tree-sitter-rust/releases/latest/download/tree-sitter-rust.wasm"),
+    ("javascript", "https://github.com/tree-sitter/tree-sitter-javascript/releases/latest/download/tree-sitter-javascript.wasm"),
+    ("c",          "https://github.com/tree-sitter/tree-sitter-c/releases/latest/download/tree-sitter-c.wasm"),
+    ("cpp",        "https://github.com/tree-sitter/tree-sitter-cpp/releases/latest/download/tree-sitter-cpp.wasm"),
+    ("java",       "https://github.com/tree-sitter/tree-sitter-java/releases/latest/download/tree-sitter-java.wasm"),
+    ("ruby",       "https://github.com/tree-sitter/tree-sitter-ruby/releases/latest/download/tree-sitter-ruby.wasm"),
+    ("php",        "https://github.com/tree-sitter/tree-sitter-php/releases/latest/download/tree-sitter-php.wasm"),
+    ("html",       "https://github.com/tree-sitter/tree-sitter-html/releases/latest/download/tree-sitter-html.wasm"),
+    ("css",        "https://github.com/tree-sitter/tree-sitter-css/releases/latest/download/tree-sitter-css.wasm"),
+    ("bash",       "https://github.com/tree-sitter/tree-sitter-bash/releases/latest/download/tree-sitter-bash.wasm"),
+    ("json",       "https://github.com/tree-sitter/tree-sitter-json/releases/latest/download/tree-sitter-json.wasm"),
 ];
 
 pub static EXTENSION_MAP: &[(&str, &str)] = &[
@@ -54,15 +52,12 @@ pub static EXTENSION_MAP: &[(&str, &str)] = &[
    ("java", "java"),
    ("rb", "ruby"),
    ("php", "php"),
-   ("swift", "swift"),
    ("html", "html"),
    ("htm", "html"),
    ("css", "css"),
    ("sh", "bash"),
    ("bash", "bash"),
    ("json", "json"),
-   ("yaml", "yaml"),
-   ("yml", "yaml"),
 ];
 
 pub struct GrammarManager {
@@ -73,6 +68,17 @@ pub struct GrammarManager {
    auto_download: bool,
 }
 
+impl std::fmt::Debug for GrammarManager {
+   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      f.debug_struct("GrammarManager")
+         .field("languages", &self.languages)
+         .field("grammars_dir", &self.grammars_dir)
+         .field("downloading", &self.downloading)
+         .field("auto_download", &self.auto_download)
+         .finish()
+   }
+}
+
 impl GrammarManager {
    pub fn new() -> Result<Self> {
       Self::with_auto_download(true)
@@ -80,13 +86,13 @@ impl GrammarManager {
 
    pub fn with_auto_download(auto_download: bool) -> Result<Self> {
       let home = directories::UserDirs::new()
-         .ok_or_else(|| SmgrepError::Config("failed to get user directories".into()))?
+         .ok_or_else(|| Error::Config(ConfigError::GetUserDirectories))?
          .home_dir()
          .to_path_buf();
 
       let grammars_dir = home.join(".smgrep").join("grammars");
       fs::create_dir_all(&grammars_dir)
-         .map_err(|e| SmgrepError::Config(format!("failed to create grammars directory: {}", e)))?;
+         .map_err(|e| Error::Config(ConfigError::CreateGrammarsDir(e)))?;
 
       let engine = wasmtime::Engine::default();
 
@@ -118,7 +124,7 @@ impl GrammarManager {
    }
 
    pub fn grammar_path(&self, lang: &str) -> PathBuf {
-      self.grammars_dir.join(format!("tree-sitter-{}.wasm", lang))
+      self.grammars_dir.join(format!("tree-sitter-{lang}.wasm"))
    }
 
    pub fn is_available(&self, lang: &str) -> bool {
@@ -143,61 +149,57 @@ impl GrammarManager {
 
    fn load_language_from_file(&self, lang: &str) -> Result<Language> {
       let wasm_path = self.grammar_path(lang);
-      let wasm_bytes = fs::read(&wasm_path)
-         .map_err(|e| SmgrepError::Chunker(format!("failed to read WASM file: {}", e)))?;
+      let wasm_bytes = fs::read(&wasm_path)?;
 
-      let mut store = WasmStore::new(&self.engine)
-         .map_err(|e| SmgrepError::Chunker(format!("failed to create WASM store: {}", e)))?;
+      let mut store = WasmStore::new(&self.engine).map_err(ChunkerError::CreateWasmStore)?;
 
-      let language = store
-         .load_language(lang, &wasm_bytes)
-         .map_err(|e| SmgrepError::Chunker(format!("failed to load language {}: {}", lang, e)))?;
+      let language = store.load_language(lang, &wasm_bytes).map_err(|e| {
+         Error::Chunker(ChunkerError::LoadLanguage { lang: lang.to_string(), reason: e })
+      })?;
 
       Ok(language)
    }
 
    fn download_grammar_sync(&self, lang: &str) -> Result<()> {
       let url = Self::grammar_url(lang)
-         .ok_or_else(|| SmgrepError::Config(format!("unknown language: {}", lang)))?;
+         .ok_or_else(|| Error::Config(ConfigError::UnknownLanguage(lang.to_string())))?;
       let dest = self.grammar_path(lang);
       let temp_dest = self
          .grammars_dir
-         .join(format!(".tree-sitter-{}.wasm.tmp", lang));
+         .join(format!(".tree-sitter-{lang}.wasm.tmp"));
 
       tracing::info!("downloading grammar for {} from {}", lang, url);
 
       let download = async {
-         let response = reqwest::get(url)
-            .await
-            .map_err(|e| SmgrepError::Config(format!("failed to download {}: {}", lang, e)))?;
+         let response = reqwest::get(url).await.map_err(|e| {
+            Error::Config(ConfigError::DownloadFailed { lang: lang.to_string(), reason: e })
+         })?;
 
          if !response.status().is_success() {
-            return Err(SmgrepError::Config(format!(
-               "failed to download {}: HTTP {}",
-               lang,
-               response.status()
-            )));
+            return Err(Error::Config(ConfigError::DownloadHttpStatus {
+               lang:   lang.to_string(),
+               status: response.status().as_u16(),
+            }));
          }
 
          let bytes = response
             .bytes()
             .await
-            .map_err(|e| SmgrepError::Config(format!("failed to read response: {}", e)))?;
+            .map_err(|e| Error::Config(ConfigError::ReadResponse(e)))?;
 
-         fs::write(&temp_dest, &bytes)
-            .map_err(|e| SmgrepError::Config(format!("failed to write WASM file: {}", e)))?;
+         fs::write(&temp_dest, &bytes).map_err(|e| Error::Config(ConfigError::WriteWasmFile(e)))?;
 
          fs::rename(&temp_dest, &dest)
-            .map_err(|e| SmgrepError::Config(format!("failed to rename WASM file: {}", e)))?;
+            .map_err(|e| Error::Config(ConfigError::RenameWasmFile(e)))?;
 
-         Ok::<_, SmgrepError>(())
+         Ok::<_, Error>(())
       };
 
       if let Ok(handle) = tokio::runtime::Handle::try_current() {
          tokio::task::block_in_place(|| handle.block_on(download))?;
       } else {
          tokio::runtime::Runtime::new()
-            .map_err(|e| SmgrepError::Config(format!("failed to create runtime: {}", e)))?
+            .map_err(|e| Error::Config(ConfigError::CreateRuntime(io::Error::other(e))))?
             .block_on(download)?;
       }
 
@@ -270,37 +272,33 @@ impl GrammarManager {
 
    pub fn create_parser_with_store(&self) -> Result<(Parser, WasmStore)> {
       let parser = Parser::new();
-      let store = WasmStore::new(&self.engine)
-         .map_err(|e| SmgrepError::Chunker(format!("failed to create WASM store: {}", e)))?;
+      let store = WasmStore::new(&self.engine).map_err(ChunkerError::CreateWasmStore)?;
 
       Ok((parser, store))
    }
 
    pub async fn download_grammar(&self, lang: &str) -> Result<()> {
       let url = Self::grammar_url(lang)
-         .ok_or_else(|| SmgrepError::Config(format!("unknown language: {}", lang)))?;
+         .ok_or_else(|| Error::Config(ConfigError::UnknownLanguage(lang.to_string())))?;
 
       let dest = self.grammar_path(lang);
-
-      let response = reqwest::get(url)
-         .await
-         .map_err(|e| SmgrepError::Config(format!("failed to download {}: {}", lang, e)))?;
+      let response = reqwest::get(url).await.map_err(|e| {
+         Error::Config(ConfigError::DownloadFailed { lang: lang.to_string(), reason: e })
+      })?;
 
       if !response.status().is_success() {
-         return Err(SmgrepError::Config(format!(
-            "failed to download {}: HTTP {}",
-            lang,
-            response.status()
-         )));
+         return Err(Error::Config(ConfigError::DownloadHttpStatus {
+            lang:   lang.to_string(),
+            status: response.status().as_u16(),
+         }));
       }
 
       let bytes = response
          .bytes()
          .await
-         .map_err(|e| SmgrepError::Config(format!("failed to read response: {}", e)))?;
+         .map_err(|e| Error::Config(ConfigError::ReadResponse(e)))?;
 
-      fs::write(&dest, &bytes)
-         .map_err(|e| SmgrepError::Config(format!("failed to write WASM file: {}", e)))?;
+      fs::write(&dest, &bytes).map_err(|e| Error::Config(ConfigError::WriteWasmFile(e)))?;
 
       Ok(())
    }

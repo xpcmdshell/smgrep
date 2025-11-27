@@ -10,8 +10,7 @@ fn main() {
       .ok()
       .filter(|o| o.status.success())
       .and_then(|o| String::from_utf8(o.stdout).ok())
-      .map(|s| s.trim().to_string())
-      .unwrap_or_else(|| "unknown".to_string());
+      .map_or_else(|| "unknown".to_string(), |s| s.trim().to_string());
 
    let git_tag = Command::new("git")
       .args(["describe", "--tags", "--abbrev=0"])
@@ -27,10 +26,9 @@ fn main() {
       .output()
       .ok()
       .filter(|o| o.status.success())
-      .map(|o| !o.stdout.is_empty())
-      .unwrap_or(false);
+      .is_some_and(|o| !o.stdout.is_empty());
 
-   println!("cargo:rustc-env=GIT_HASH={}", git_hash);
-   println!("cargo:rustc-env=GIT_TAG={}", git_tag);
+   println!("cargo:rustc-env=GIT_HASH={git_hash}");
+   println!("cargo:rustc-env=GIT_TAG={git_tag}");
    println!("cargo:rustc-env=GIT_DIRTY={}", if git_dirty { "true" } else { "false" });
 }

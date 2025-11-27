@@ -9,7 +9,7 @@ use syntect::{
 };
 
 use super::{Formatter, detect_language, get_semantic_tags, truncate_line};
-use crate::types::SearchResult;
+use crate::types::{ChunkType, SearchResult};
 
 pub struct HumanFormatter {
    syntax_set: SyntaxSet,
@@ -70,13 +70,10 @@ impl HumanFormatter {
             if curr.path == result.path
                && result.start_line <= curr.start_line + curr.num_lines + 10
             {
-               curr.content.push_str("\n// ...\n");
-               curr.content.push_str(&result.content);
+               let merged = format!("{}\n// ...\n{}", curr.content, result.content);
+               curr.content = merged.into();
                curr.num_lines = result.start_line + result.num_lines - curr.start_line;
-               if matches!(
-                  result.chunk_type,
-                  Some(crate::types::ChunkType::Function) | Some(crate::types::ChunkType::Class)
-               ) {
+               if matches!(result.chunk_type, Some(ChunkType::Function | ChunkType::Class)) {
                   curr.chunk_type = result.chunk_type;
                }
             } else {
@@ -129,10 +126,10 @@ impl Formatter for HumanFormatter {
 
       for (idx, result) in merged.iter().enumerate() {
          let tags = get_semantic_tags(result);
-         let tag_str = if !tags.is_empty() {
-            format!(" {}", blue.apply_to(format!("[{}]", tags.join(", "))))
-         } else {
+         let tag_str = if tags.is_empty() {
             String::new()
+         } else {
+            format!(" {}", blue.apply_to(format!("[{}]", tags.join(", "))))
          };
 
          let score_str = if show_scores {
@@ -144,7 +141,7 @@ impl Formatter for HumanFormatter {
          output.push_str(&format!(
             "{}. 📂 {} {}{}{}\n",
             idx + 1,
-            green.apply_to(&result.path),
+            green.apply_to(result.path.display()),
             dim.apply_to(format!(":{}", result.start_line + 1)),
             tag_str,
             score_str
@@ -165,11 +162,7 @@ impl Formatter for HumanFormatter {
 
          for (line_idx, line) in highlighted.lines().enumerate() {
             let line_num = result.start_line + line_idx as u32 + 1;
-            output.push_str(&format!(
-               "   {} │ {}\n",
-               dim.apply_to(format!("{:4}", line_num)),
-               line
-            ));
+            output.push_str(&format!("   {} │ {}\n", dim.apply_to(format!("{line_num:4}")), line));
          }
 
          output.push('\n');
@@ -194,7 +187,7 @@ impl Default for AgentFormatter {
 }
 
 impl AgentFormatter {
-   pub fn new() -> Self {
+   pub const fn new() -> Self {
       Self
    }
 
@@ -238,13 +231,13 @@ impl Formatter for AgentFormatter {
       for result in results {
          let line = result.start_line + 1;
          let tags = get_semantic_tags(result);
-         let tag_str = if !tags.is_empty() {
-            format!(" [{}]", tags.join(","))
-         } else {
+         let tag_str = if tags.is_empty() {
             String::new()
+         } else {
+            format!(" [{}]", tags.join(","))
          };
 
-         output.push_str(&format!("{}:{}{}\n", result.path, line, tag_str));
+         output.push_str(&format!("{}:{}{}\n", result.path.display(), line, tag_str));
 
          let lines = Self::clean_snippet_lines(&result.content);
          let display_lines = if lines.len() > max_lines {
@@ -256,7 +249,7 @@ impl Formatter for AgentFormatter {
          };
 
          for line in display_lines {
-            output.push_str(&format!("  {}\n", line));
+            output.push_str(&format!("  {line}\n"));
          }
 
          output.push('\n');
@@ -276,9 +269,9 @@ pub struct CompactFormatter;
 
 impl Formatter for CompactFormatter {
    fn format(&self, results: &[SearchResult], _show_scores: bool, _show_content: bool) -> String {
-      let mut unique_paths: Vec<&str> = results
+      let mut unique_paths: Vec<String> = results
          .iter()
-         .map(|r| r.path.as_str())
+         .map(|r| r.path.to_string_lossy().to_string())
          .collect::<std::collections::HashSet<_>>()
          .into_iter()
          .collect();
@@ -291,26 +284,26 @@ impl Formatter for CompactFormatter {
 #[cfg(test)]
 mod tests {
    use super::*;
-   use crate::types::ChunkType;
+   use crate::{Str, types::ChunkType};
 
-   fn create_test_result(path: &str, start_line: u32, content: &str) -> SearchResult {
+   fn create_test_result(path: &str, start_line: u32, content: Str) -> SearchResult {
       SearchResult {
-         path: path.to_string(),
-         content: content.to_string(),
+         path: path.into(),
          score: 0.95,
          start_line,
          num_lines: content.lines().count() as u32,
          chunk_type: Some(ChunkType::Function),
          is_anchor: Some(false),
+         content,
       }
    }
 
    #[test]
    fn test_compact_formatter() {
       let results = vec![
-         create_test_result("src/main.rs", 10, "fn main() {}"),
-         create_test_result("src/lib.rs", 5, "pub fn test() {}"),
-         create_test_result("src/main.rs", 20, "fn other() {}"),
+         create_test_result("src/main.rs", 10, Str::from_static("fn main() {}")),
+         create_test_result("src/lib.rs", 5, Str::from_static("pub fn test() {}")),
+         create_test_result("src/main.rs", 20, Str::from_static("fn other() {}")),
       ];
 
       let formatter = CompactFormatter;
@@ -326,7 +319,7 @@ mod tests {
       let results = vec![create_test_result(
          "src/auth.rs",
          41,
-         "pub fn authenticate() {\n  let token = jwt::sign();\n}",
+         Str::from_static("pub fn authenticate() {\n  let token = jwt::sign();\n}"),
       )];
 
       let formatter = AgentFormatter::new();

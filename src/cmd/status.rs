@@ -1,23 +1,15 @@
-use anyhow::Result;
 use console::style;
-use tokio::net::UnixStream;
 
-use crate::ipc::{self, Request, Response};
+use crate::{
+   Result,
+   ipc::{self, Request, Response},
+   usock,
+};
 
 pub async fn execute() -> Result<()> {
-   let socks_dir = ipc::socket_dir();
+   let servers = usock::list_running_servers();
 
-   if !socks_dir.exists() {
-      println!("{}", style("No servers running").dim());
-      return Ok(());
-   }
-
-   let entries: Vec<_> = std::fs::read_dir(&socks_dir)?
-      .filter_map(|e| e.ok())
-      .filter(|e| e.path().extension().is_some_and(|ext| ext == "sock"))
-      .collect();
-
-   if entries.is_empty() {
+   if servers.is_empty() {
       println!("{}", style("No servers running").dim());
       return Ok(());
    }
@@ -26,16 +18,10 @@ pub async fn execute() -> Result<()> {
    println!();
 
    let mut buffer = ipc::SocketBuffer::new();
-   for entry in entries {
-      let socket_path = entry.path();
-      let store_id = socket_path
-         .file_stem()
-         .and_then(|s| s.to_str())
-         .unwrap_or("unknown");
-
-      match UnixStream::connect(&socket_path).await {
+   for store_id in servers {
+      match usock::Stream::connect(&store_id).await {
          Ok(mut stream) => {
-            if let Err(_) = buffer.send(&mut stream, &Request::Health).await {
+            if buffer.send(&mut stream, &Request::Health).await.is_err() {
                println!("  {} {} {}", style("●").yellow(), store_id, style("(unresponsive)").dim());
                continue;
             }
@@ -51,7 +37,7 @@ pub async fn execute() -> Result<()> {
                      "  {} {} {}",
                      style("●").green(),
                      store_id,
-                     style(format!("({})", state)).dim()
+                     style(format!("({state})")).dim()
                   );
                },
                _ => {

@@ -1,18 +1,18 @@
 use std::{fs, path::PathBuf};
 
-use anyhow::{Context, Result};
 use console::style;
 
 use crate::{
-   config,
+   Result, config,
+   error::ConfigError,
    grammar::{GRAMMAR_URLS, GrammarManager},
 };
 
-pub async fn execute() -> Result<()> {
+pub fn execute() -> Result<()> {
    println!("{}\n", style("smgrep Doctor").bold());
 
    let home = directories::UserDirs::new()
-      .context("failed to get user directories")?
+      .ok_or(ConfigError::GetUserDirectories)?
       .home_dir()
       .to_path_buf();
 
@@ -53,13 +53,12 @@ pub async fn execute() -> Result<()> {
 
    println!();
 
-   let grammar_manager = match GrammarManager::with_auto_download(false) {
-      Ok(gm) => Some(gm),
-      Err(_) => {
-         println!("{} Grammar manager: {}", style("✗").red(), style("failed to initialize").dim());
-         all_good = false;
-         None
-      },
+   let grammar_manager = if let Ok(gm) = GrammarManager::with_auto_download(false) {
+      Some(gm)
+   } else {
+      println!("{} Grammar manager: {}", style("✗").red(), style("failed to initialize").dim());
+      all_good = false;
+      None
    };
 
    if let Some(gm) = &grammar_manager {
@@ -167,7 +166,7 @@ fn format_size(bytes: u64) -> String {
    const GB: u64 = MB * 1024;
 
    if bytes < KB {
-      format!("{} B", bytes)
+      format!("{bytes} B")
    } else if bytes < MB {
       format!("{:.1} KB", bytes as f64 / KB as f64)
    } else if bytes < GB {

@@ -1,11 +1,23 @@
 pub mod lance;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+   collections::HashMap,
+   path::{Path, PathBuf},
+   sync::Arc,
+};
 
 use crate::{
    error::Result,
+   meta::FileHash,
    types::{SearchResponse, StoreInfo, VectorRecord},
 };
+
+pub fn path_to_store_key(path: &Path) -> String {
+   match path.to_str() {
+      Some(s) => s.replace('\'', "''"),
+      None => hex::encode(path.as_os_str().as_encoded_bytes()),
+   }
+}
 
 #[async_trait::async_trait]
 pub trait Store: Send + Sync {
@@ -18,19 +30,19 @@ pub trait Store: Send + Sync {
       query_vector: &[f32],
       query_colbert: &[Vec<f32>],
       limit: usize,
-      path_filter: Option<&str>,
+      path_filter: Option<&Path>,
       rerank: bool,
    ) -> Result<SearchResponse>;
 
-   async fn delete_file(&self, store_id: &str, file_path: &str) -> Result<()>;
+   async fn delete_file(&self, store_id: &str, file_path: &Path) -> Result<()>;
 
-   async fn delete_files(&self, store_id: &str, file_paths: &[String]) -> Result<()>;
+   async fn delete_files(&self, store_id: &str, file_paths: &[PathBuf]) -> Result<()>;
 
    async fn delete_store(&self, store_id: &str) -> Result<()>;
 
    async fn get_info(&self, store_id: &str) -> Result<StoreInfo>;
 
-   async fn list_files(&self, store_id: &str) -> Result<Vec<String>>;
+   async fn list_files(&self, store_id: &str) -> Result<Vec<PathBuf>>;
 
    async fn is_empty(&self, store_id: &str) -> Result<bool>;
 
@@ -38,7 +50,7 @@ pub trait Store: Send + Sync {
 
    async fn create_vector_index(&self, store_id: &str) -> Result<()>;
 
-   async fn get_file_hashes(&self, store_id: &str) -> Result<HashMap<String, String>>;
+   async fn get_file_hashes(&self, store_id: &str) -> Result<HashMap<PathBuf, FileHash>>;
 }
 
 #[async_trait::async_trait]
@@ -54,7 +66,7 @@ impl<T: Store + ?Sized> Store for Arc<T> {
       query_vector: &[f32],
       query_colbert: &[Vec<f32>],
       limit: usize,
-      path_filter: Option<&str>,
+      path_filter: Option<&Path>,
       rerank: bool,
    ) -> Result<SearchResponse> {
       (**self)
@@ -62,11 +74,11 @@ impl<T: Store + ?Sized> Store for Arc<T> {
          .await
    }
 
-   async fn delete_file(&self, store_id: &str, file_path: &str) -> Result<()> {
+   async fn delete_file(&self, store_id: &str, file_path: &Path) -> Result<()> {
       (**self).delete_file(store_id, file_path).await
    }
 
-   async fn delete_files(&self, store_id: &str, file_paths: &[String]) -> Result<()> {
+   async fn delete_files(&self, store_id: &str, file_paths: &[PathBuf]) -> Result<()> {
       (**self).delete_files(store_id, file_paths).await
    }
 
@@ -78,7 +90,7 @@ impl<T: Store + ?Sized> Store for Arc<T> {
       (**self).get_info(store_id).await
    }
 
-   async fn list_files(&self, store_id: &str) -> Result<Vec<String>> {
+   async fn list_files(&self, store_id: &str) -> Result<Vec<PathBuf>> {
       (**self).list_files(store_id).await
    }
 
@@ -94,7 +106,7 @@ impl<T: Store + ?Sized> Store for Arc<T> {
       (**self).create_vector_index(store_id).await
    }
 
-   async fn get_file_hashes(&self, store_id: &str) -> Result<HashMap<String, String>> {
+   async fn get_file_hashes(&self, store_id: &str) -> Result<HashMap<PathBuf, FileHash>> {
       (**self).get_file_hashes(store_id).await
    }
 }

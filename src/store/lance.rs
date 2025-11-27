@@ -1,27 +1,144 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+   collections::{HashMap, HashSet},
+   path::{Path, PathBuf},
+   sync::Arc,
+};
 
 use arrow_array::{
-   Array, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, LargeBinaryArray,
-   LargeStringArray, RecordBatch, RecordBatchReader, StringArray, UInt32Array,
+   Array, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
+   LargeBinaryArray, LargeStringArray, RecordBatch, RecordBatchReader, StringArray, UInt32Array,
    builder::{
-      BooleanBuilder, Float32Builder, Float64Builder, LargeBinaryBuilder, LargeStringBuilder,
-      StringBuilder, UInt32Builder,
+      BinaryBuilder, BooleanBuilder, Float32Builder, Float64Builder, LargeBinaryBuilder,
+      LargeStringBuilder, StringBuilder, UInt32Builder,
    },
 };
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use futures::TryStreamExt;
 use lancedb::{
    Connection, Table, connect,
-   index::scalar::FullTextSearchQuery,
-   query::{ExecutableQuery, QueryBase},
+   index::{Index, scalar::FullTextSearchQuery},
+   query::{ExecutableQuery, QueryBase, Select},
 };
 use parking_lot::RwLock;
 
 use crate::{
-   config,
-   error::{Result, SmgrepError},
+   Str, config,
+   error::{Error, Result},
+   meta::FileHash,
+   store,
    types::{ChunkType, SearchResponse, SearchResult, SearchStatus, StoreInfo, VectorRecord},
 };
+
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+   #[error("invalid database path")]
+   InvalidDatabasePath,
+
+   #[error("failed to connect to database: {0}")]
+   Connect(#[source] lancedb::Error),
+
+   #[error("failed to reopen table after migration: {0}")]
+   ReopenTableAfterMigration(#[source] lancedb::Error),
+
+   #[error("failed to create table: {0}")]
+   CreateTable(#[source] lancedb::Error),
+
+   #[error("failed to sample table for migration check: {0}")]
+   SampleTableForMigration(#[source] lancedb::Error),
+
+   #[error("failed to read sample batch: {0}")]
+   ReadSampleBatch(#[source] lancedb::Error),
+
+   #[error("failed to read existing data for migration: {0}")]
+   ReadExistingDataForMigration(#[source] lancedb::Error),
+
+   #[error("failed to collect existing batches: {0}")]
+   CollectExistingBatches(#[source] lancedb::Error),
+
+   #[error("failed to drop old table during migration: {0}")]
+   DropOldTableDuringMigration(#[source] lancedb::Error),
+
+   #[error("failed to create new table during migration: {0}")]
+   CreateNewTableDuringMigration(#[source] lancedb::Error),
+
+   #[error("failed to add migrated records: {0}")]
+   AddMigratedRecords(#[source] lancedb::Error),
+
+   #[error("failed to create empty batch: {0}")]
+   CreateEmptyBatch(#[source] ArrowError),
+
+   #[error("empty batch")]
+   EmptyBatch,
+
+   #[error("failed to create record batch: {0}")]
+   CreateRecordBatch(#[source] ArrowError),
+
+   #[error("failed to add records: {0}")]
+   AddRecords(#[source] lancedb::Error),
+
+   #[error("failed to create vector query: {0}")]
+   CreateVectorQuery(#[source] lancedb::Error),
+
+   #[error("failed to execute code search: {0}")]
+   ExecuteCodeSearch(#[source] lancedb::Error),
+
+   #[error("failed to execute doc search: {0}")]
+   ExecuteDocSearch(#[source] lancedb::Error),
+
+   #[error("failed to collect code results: {0}")]
+   CollectCodeResults(#[source] lancedb::Error),
+
+   #[error("failed to collect doc results: {0}")]
+   CollectDocResults(#[source] lancedb::Error),
+
+   #[error("missing path column")]
+   MissingPathColumn,
+
+   #[error("path column type mismatch")]
+   PathColumnTypeMismatch,
+
+   #[error("missing start_line column")]
+   MissingStartLineColumn,
+
+   #[error("start_line type mismatch")]
+   StartLineTypeMismatch,
+
+   #[error("content column type mismatch")]
+   ContentColumnTypeMismatch,
+
+   #[error("vector column type mismatch")]
+   VectorColumnTypeMismatch,
+
+   #[error("vector values type mismatch")]
+   VectorValuesTypeMismatch,
+
+   #[error("failed to delete file: {0}")]
+   DeleteFile(#[source] lancedb::Error),
+
+   #[error("failed to delete files: {0}")]
+   DeleteFiles(#[source] lancedb::Error),
+
+   #[error("failed to drop table: {0}")]
+   DropTable(#[source] lancedb::Error),
+
+   #[error("failed to count rows: {0}")]
+   CountRows(#[source] lancedb::Error),
+
+   #[error("failed to execute query: {0}")]
+   ExecuteQuery(#[source] lancedb::Error),
+
+   #[error("failed to collect results: {0}")]
+   CollectResults(#[source] lancedb::Error),
+
+   #[error("index already exists")]
+   IndexAlreadyExists,
+
+   #[error("failed to create FTS index: {0}")]
+   CreateFtsIndex(#[source] lancedb::Error),
+
+   #[error("failed to create vector index: {0}")]
+   CreateVectorIndex(#[source] lancedb::Error),
+}
 
 pub enum RecordBatchOnce {
    Batch(RecordBatch),
@@ -30,7 +147,7 @@ pub enum RecordBatchOnce {
 }
 
 impl RecordBatchOnce {
-   pub fn new(batch: RecordBatch) -> Self {
+   pub const fn new(batch: RecordBatch) -> Self {
       Self::Batch(batch)
    }
 
@@ -38,7 +155,7 @@ impl RecordBatchOnce {
       let prev = std::mem::replace(self, Self::__Invalid);
       match prev {
          Self::Batch(batch) => {
-            *self = Self::Taken(batch.schema().clone());
+            *self = Self::Taken(batch.schema());
             Ok(batch)
          },
          Self::Taken(schema) => {
@@ -63,7 +180,7 @@ impl Iterator for RecordBatchOnce {
 impl RecordBatchReader for RecordBatchOnce {
    fn schema(&self) -> arrow_schema::SchemaRef {
       match self {
-         Self::Batch(batch) => batch.schema().clone(),
+         Self::Batch(batch) => batch.schema(),
          Self::Taken(schema) => schema.clone(),
          Self::__Invalid => unreachable!(),
       }
@@ -77,7 +194,7 @@ pub struct LanceStore {
 
 impl LanceStore {
    pub fn new() -> Result<Self> {
-      let data_dir = crate::config::data_dir().join("data");
+      let data_dir = config::data_dir().join("data");
       std::fs::create_dir_all(&data_dir)?;
 
       Ok(Self { connections: RwLock::new(HashMap::new()), data_dir })
@@ -97,11 +214,11 @@ impl LanceStore {
       let conn = connect(
          db_path
             .to_str()
-            .ok_or_else(|| SmgrepError::Store("invalid database path".to_string()))?,
+            .ok_or_else(|| Error::Store(StoreError::InvalidDatabasePath))?,
       )
       .execute()
       .await
-      .map_err(|e| SmgrepError::Store(format!("failed to connect to database: {}", e)))?;
+      .map_err(|e| Error::Store(StoreError::Connect(e)))?;
 
       let conn = Arc::new(conn);
       self
@@ -115,23 +232,22 @@ impl LanceStore {
    async fn get_table(&self, store_id: &str) -> Result<Table> {
       let conn = self.get_connection(store_id).await?;
 
-      match conn.open_table(store_id).execute().await {
-         Ok(table) => {
-            Self::check_and_migrate_table(&conn, store_id, &table).await?;
-            conn.open_table(store_id).execute().await.map_err(|e| {
-               SmgrepError::Store(format!("failed to reopen table after migration: {}", e))
-            })
-         },
-         Err(_) => {
-            let schema = Self::create_schema();
-            let empty_batch = Self::create_empty_batch(&schema)?;
+      if let Ok(table) = conn.open_table(store_id).execute().await {
+         Self::check_and_migrate_table(&conn, store_id, &table).await?;
+         conn
+            .open_table(store_id)
+            .execute()
+            .await
+            .map_err(|e| Error::Store(StoreError::ReopenTableAfterMigration(e)))
+      } else {
+         let schema = Self::create_schema();
+         let empty_batch = Self::create_empty_batch(&schema)?;
 
-            conn
-               .create_table(store_id, RecordBatchOnce::new(empty_batch))
-               .execute()
-               .await
-               .map_err(|e| SmgrepError::Store(format!("failed to create table: {}", e)))
-         },
+         conn
+            .create_table(store_id, RecordBatchOnce::new(empty_batch))
+            .execute()
+            .await
+            .map_err(|e| Error::Store(StoreError::CreateTable(e)))
       }
    }
 
@@ -140,14 +256,19 @@ impl LanceStore {
       store_id: &str,
       table: &Table,
    ) -> Result<()> {
-      let mut stream = table.query().limit(1).execute().await.map_err(|e| {
-         SmgrepError::Store(format!("failed to sample table for migration check: {}", e))
-      })?;
+      let mut stream = table
+         .query()
+         .limit(1)
+         .execute()
+         .await
+         .map_err(|e| Error::Store(StoreError::SampleTableForMigration(e)))?;
 
       let sample_batch = match stream.try_next().await {
          Ok(Some(batch)) => batch,
          Ok(None) => return Ok(()),
-         Err(e) => return Err(SmgrepError::Store(format!("failed to read sample batch: {}", e))),
+         Err(e) => {
+            return Err(Error::Store(StoreError::ReadSampleBatch(e)));
+         },
       };
 
       let vector_col = match sample_batch.column_by_name("vector") {
@@ -166,22 +287,25 @@ impl LanceStore {
          return Ok(());
       }
 
-      let mut all_stream = table.query().execute().await.map_err(|e| {
-         SmgrepError::Store(format!("failed to read existing data for migration: {}", e))
-      })?;
+      let mut all_stream = table
+         .query()
+         .execute()
+         .await
+         .map_err(|e| Error::Store(StoreError::ReadExistingDataForMigration(e)))?;
 
       let mut existing_batches: Vec<RecordBatch> = Vec::new();
       while let Some(batch) = all_stream
          .try_next()
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to collect existing batches: {}", e)))?
+         .map_err(|e| Error::Store(StoreError::CollectExistingBatches(e)))?
       {
          existing_batches.push(batch);
       }
 
-      conn.drop_table(store_id, &[]).await.map_err(|e| {
-         SmgrepError::Store(format!("failed to drop old table during migration: {}", e))
-      })?;
+      conn
+         .drop_table(store_id, &[])
+         .await
+         .map_err(|e| Error::Store(StoreError::DropOldTableDuringMigration(e)))?;
 
       let schema = Self::create_schema();
       let empty_batch = Self::create_empty_batch(&schema)?;
@@ -190,9 +314,7 @@ impl LanceStore {
          .create_table(store_id, RecordBatchOnce::new(empty_batch))
          .execute()
          .await
-         .map_err(|e| {
-            SmgrepError::Store(format!("failed to create new table during migration: {}", e))
-         })?;
+         .map_err(|e| Error::Store(StoreError::CreateNewTableDuringMigration(e)))?;
 
       if !existing_batches.is_empty() {
          let mut migrated_records = Vec::new();
@@ -205,19 +327,19 @@ impl LanceStore {
                   .map(|arr| arr.value(row_idx).to_string())
                   .unwrap_or_default();
 
-               let path = batch
+               let path: PathBuf = batch
                   .column_by_name("path")
                   .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-                  .map(|arr| arr.value(row_idx).to_string())
+                  .map(|arr| arr.value(row_idx).into())
                   .unwrap_or_default();
 
                let hash = batch
                   .column_by_name("hash")
-                  .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-                  .map(|arr| arr.value(row_idx).to_string())
+                  .and_then(|col| col.as_any().downcast_ref::<BinaryArray>())
+                  .and_then(|arr| FileHash::from_slice(arr.value(row_idx)))
                   .unwrap_or_default();
 
-               let content = batch
+               let content: Str = batch
                   .column_by_name("content")
                   .and_then(|col| {
                      col.as_any()
@@ -229,19 +351,18 @@ impl LanceStore {
                               .map(|arr| arr.value(row_idx).to_string())
                         })
                   })
-                  .unwrap_or_default();
+                  .unwrap_or_default()
+                  .into();
 
                let start_line = batch
                   .column_by_name("start_line")
                   .and_then(|col| col.as_any().downcast_ref::<UInt32Array>())
-                  .map(|arr| arr.value(row_idx))
-                  .unwrap_or(0);
+                  .map_or(0, |arr| arr.value(row_idx));
 
                let end_line = batch
                   .column_by_name("end_line")
                   .and_then(|col| col.as_any().downcast_ref::<UInt32Array>())
-                  .map(|arr| arr.value(row_idx))
-                  .unwrap_or(start_line);
+                  .map_or(start_line, |arr| arr.value(row_idx));
 
                let old_vector_col = batch.column_by_name("vector").unwrap();
                let old_vector_list = old_vector_col
@@ -296,49 +417,47 @@ impl LanceStore {
                   }
                });
 
-               let is_anchor = batch
-                  .column_by_name("is_anchor")
-                  .and_then(|col| {
-                     if col.is_null(row_idx) {
-                        None
-                     } else {
-                        col.as_any()
-                           .downcast_ref::<BooleanArray>()
-                           .map(|arr| arr.value(row_idx))
-                     }
-                  });
+               let is_anchor = batch.column_by_name("is_anchor").and_then(|col| {
+                  if col.is_null(row_idx) {
+                     None
+                  } else {
+                     col.as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .map(|arr| arr.value(row_idx))
+                  }
+               });
 
-               let chunk_type = batch
-                  .column_by_name("chunk_type")
-                  .and_then(|col| {
+               let chunk_type = batch.column_by_name("chunk_type").and_then(|col| {
+                  if col.is_null(row_idx) {
+                     None
+                  } else {
+                     col.as_any()
+                        .downcast_ref::<StringArray>()
+                        .map(|arr| Self::parse_chunk_type(arr.value(row_idx)))
+                  }
+               });
+
+               let context_prev: Option<Str> =
+                  batch.column_by_name("context_prev").and_then(|col| {
                      if col.is_null(row_idx) {
                         None
                      } else {
                         col.as_any()
                            .downcast_ref::<StringArray>()
-                           .map(|arr| Self::parse_chunk_type(arr.value(row_idx)))
+                           .map(|arr| Str::copy_from_str(arr.value(row_idx)))
                      }
                   });
 
-               let context_prev = batch.column_by_name("context_prev").and_then(|col| {
-                  if col.is_null(row_idx) {
-                     None
-                  } else {
-                     col.as_any()
-                        .downcast_ref::<StringArray>()
-                        .map(|arr| arr.value(row_idx).to_string())
-                  }
-               });
-
-               let context_next = batch.column_by_name("context_next").and_then(|col| {
-                  if col.is_null(row_idx) {
-                     None
-                  } else {
-                     col.as_any()
-                        .downcast_ref::<StringArray>()
-                        .map(|arr| arr.value(row_idx).to_string())
-                  }
-               });
+               let context_next: Option<Str> =
+                  batch.column_by_name("context_next").and_then(|col| {
+                     if col.is_null(row_idx) {
+                        None
+                     } else {
+                        col.as_any()
+                           .downcast_ref::<StringArray>()
+                           .map(|arr| Str::copy_from_str(arr.value(row_idx)))
+                     }
+                  });
 
                migrated_records.push(VectorRecord {
                   id,
@@ -365,7 +484,7 @@ impl LanceStore {
                .add(RecordBatchOnce::new(migrated_batch))
                .execute()
                .await
-               .map_err(|e| SmgrepError::Store(format!("failed to add migrated records: {}", e)))?;
+               .map_err(|e| Error::Store(StoreError::AddMigratedRecords(e)))?;
          }
       }
 
@@ -384,7 +503,7 @@ impl LanceStore {
       Arc::new(Schema::new(vec![
          Field::new("id", DataType::Utf8, false),
          Field::new("path", DataType::Utf8, false),
-         Field::new("hash", DataType::Utf8, false),
+         Field::new("hash", DataType::Binary, false),
          Field::new("content", DataType::LargeUtf8, false),
          Field::new("start_line", DataType::UInt32, false),
          Field::new("end_line", DataType::UInt32, false),
@@ -409,7 +528,7 @@ impl LanceStore {
    fn create_empty_batch(schema: &Arc<Schema>) -> Result<RecordBatch> {
       let id_array = StringBuilder::new().finish();
       let path_array = StringBuilder::new().finish();
-      let hash_array = StringBuilder::new().finish();
+      let hash_array = BinaryBuilder::new().finish();
       let content_array = LargeStringBuilder::new().finish();
       let start_line_array = UInt32Builder::new().finish();
       let end_line_array = UInt32Builder::new().finish();
@@ -446,12 +565,12 @@ impl LanceStore {
          Arc::new(context_prev_array),
          Arc::new(context_next_array),
       ])
-      .map_err(|e| SmgrepError::Store(format!("failed to create empty batch: {}", e)))
+      .map_err(|e| Error::Store(StoreError::CreateEmptyBatch(e)))
    }
 
    fn records_to_batch(records: Vec<VectorRecord>) -> Result<RecordBatch> {
       if records.is_empty() {
-         return Err(SmgrepError::Store("empty batch".to_string()));
+         return Err(Error::Store(StoreError::EmptyBatch));
       }
 
       let schema = Self::create_schema();
@@ -459,7 +578,7 @@ impl LanceStore {
 
       let mut id_builder = StringBuilder::new();
       let mut path_builder = StringBuilder::new();
-      let mut hash_builder = StringBuilder::new();
+      let mut hash_builder = BinaryBuilder::new();
       let mut content_builder = LargeStringBuilder::new();
       let mut start_line_builder = UInt32Builder::new();
       let mut end_line_builder = UInt32Builder::new();
@@ -474,19 +593,15 @@ impl LanceStore {
 
       for record in records {
          id_builder.append_value(&record.id);
-         path_builder.append_value(&record.path);
-         hash_builder.append_value(&record.hash);
+         path_builder.append_value(store::path_to_store_key(&record.path));
+         hash_builder.append_value(record.hash);
          content_builder.append_value(&record.content);
          start_line_builder.append_value(record.start_line);
          end_line_builder.append_value(record.end_line);
 
          let dim = config::get().dense_dim;
          if record.vector.len() != dim {
-            return Err(SmgrepError::Store(format!(
-               "vector dimension mismatch: expected {}, got {}",
-               dim,
-               record.vector.len()
-            )));
+            return Err(Error::Store(StoreError::VectorColumnTypeMismatch));
          }
 
          for &val in &record.vector {
@@ -575,7 +690,7 @@ impl LanceStore {
          Arc::new(context_prev_array),
          Arc::new(context_next_array),
       ])
-      .map_err(|e| SmgrepError::Store(format!("failed to create record batch: {}", e)))
+      .map_err(|e| Error::Store(StoreError::CreateRecordBatch(e)))
    }
 
    fn parse_chunk_type(s: &str) -> ChunkType {
@@ -663,7 +778,7 @@ impl super::Store for LanceStore {
          .add(RecordBatchOnce::new(batch))
          .execute()
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to add records: {}", e)))?;
+         .map_err(|e| Error::Store(StoreError::AddRecords(e)))?;
 
       Ok(())
    }
@@ -675,7 +790,7 @@ impl super::Store for LanceStore {
       query_vector: &[f32],
       query_colbert: &[Vec<f32>],
       limit: usize,
-      path_filter: Option<&str>,
+      path_filter: Option<&Path>,
       rerank: bool,
    ) -> Result<SearchResponse> {
       let table = match self.get_table(store_id).await {
@@ -692,49 +807,49 @@ impl super::Store for LanceStore {
       let anchor_filter = "(is_anchor IS NULL OR is_anchor = false)";
       let doc_clause =
          "(path LIKE '%.md' OR path LIKE '%.mdx' OR path LIKE '%.txt' OR path LIKE '%.json')";
-      let code_clause = format!("NOT {}", doc_clause);
+      let code_clause = format!("NOT {doc_clause}");
 
-      let mut code_filter = format!("{} AND {}", code_clause, anchor_filter);
-      let mut doc_filter = format!("{} AND {}", doc_clause, anchor_filter);
+      let mut code_filter = format!("{code_clause} AND {anchor_filter}");
+      let mut doc_filter = format!("{doc_clause} AND {anchor_filter}");
       let mut base_filter = Some(anchor_filter.to_string());
 
       if let Some(filter) = path_filter {
-         let escaped = filter.replace('\'', "''").replace('\\', "\\\\");
-         let path_clause = format!("path LIKE '{}%'", escaped);
-         code_filter = format!("{} AND {} AND {}", path_clause, code_clause, anchor_filter);
-         doc_filter = format!("{} AND {} AND {}", path_clause, doc_clause, anchor_filter);
-         base_filter = Some(format!("{} AND {}", path_clause, anchor_filter));
+         let filter_str = store::path_to_store_key(filter);
+         let path_clause = format!("path LIKE '{filter_str}%'");
+         code_filter = format!("{path_clause} AND {code_clause} AND {anchor_filter}");
+         doc_filter = format!("{path_clause} AND {doc_clause} AND {anchor_filter}");
+         base_filter = Some(format!("{path_clause} AND {anchor_filter}"));
       }
 
       let code_results_stream = table
          .query()
          .nearest_to(query_vector)
-         .map_err(|e| SmgrepError::Store(format!("failed to create vector query: {}", e)))?
+         .map_err(|e| Error::Store(StoreError::CreateVectorQuery(e)))?
          .limit(300)
          .only_if(&code_filter)
          .execute()
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to execute code search: {}", e)))?;
+         .map_err(|e| Error::Store(StoreError::ExecuteCodeSearch(e)))?;
 
       let doc_results_stream = table
          .query()
          .nearest_to(query_vector)
-         .map_err(|e| SmgrepError::Store(format!("failed to create vector query: {}", e)))?
+         .map_err(|e| Error::Store(StoreError::CreateVectorQuery(e)))?
          .only_if(&doc_filter)
          .limit(50)
          .execute()
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to execute doc search: {}", e)))?;
+         .map_err(|e| Error::Store(StoreError::ExecuteDocSearch(e)))?;
 
       let code_batches: Vec<RecordBatch> = code_results_stream
          .try_collect()
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to collect code results: {}", e)))?;
+         .map_err(|e| Error::Store(StoreError::CollectCodeResults(e)))?;
 
       let doc_batches: Vec<RecordBatch> = doc_results_stream
          .try_collect()
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to collect doc results: {}", e)))?;
+         .map_err(|e| Error::Store(StoreError::CollectDocResults(e)))?;
 
       let fts_query = FullTextSearchQuery::new(query_text.to_owned());
       let mut fts_query_builder = table.query().full_text_search(fts_query);
@@ -758,17 +873,17 @@ impl super::Store for LanceStore {
       {
          let path_col = batch
             .column_by_name("path")
-            .ok_or_else(|| SmgrepError::Store("missing path column".to_string()))?
+            .ok_or_else(|| Error::Store(StoreError::MissingPathColumn))?
             .as_any()
             .downcast_ref::<StringArray>()
-            .ok_or_else(|| SmgrepError::Store("path column type mismatch".to_string()))?;
+            .ok_or_else(|| Error::Store(StoreError::PathColumnTypeMismatch))?;
 
          let start_line_col = batch
             .column_by_name("start_line")
-            .ok_or_else(|| SmgrepError::Store("missing start_line column".to_string()))?
+            .ok_or_else(|| Error::Store(StoreError::MissingStartLineColumn))?
             .as_any()
             .downcast_ref::<UInt32Array>()
-            .ok_or_else(|| SmgrepError::Store("start_line type mismatch".to_string()))?;
+            .ok_or_else(|| Error::Store(StoreError::StartLineTypeMismatch))?;
 
          for i in 0..batch.num_rows() {
             if path_col.is_null(i) {
@@ -778,7 +893,7 @@ impl super::Store for LanceStore {
             let path = path_col.value(i).to_string();
             let start_line = start_line_col.value(i);
 
-            let key = format!("{}:{}", path, start_line);
+            let key = format!("{path}:{start_line}");
             if seen_keys.contains_key(&key) {
                continue;
             }
@@ -791,14 +906,14 @@ impl super::Store for LanceStore {
       let mut scored_results = Vec::new();
 
       for (row_idx, batch) in candidates {
-         let path = batch
+         let path: PathBuf = batch
             .column_by_name("path")
             .unwrap()
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap()
             .value(row_idx)
-            .to_string();
+            .into();
 
          let content_col = batch.column_by_name("content").unwrap();
          let content = if let Some(str_array) = content_col.as_any().downcast_ref::<StringArray>() {
@@ -808,7 +923,7 @@ impl super::Store for LanceStore {
          {
             large_str_array.value(row_idx).to_string()
          } else {
-            return Err(SmgrepError::Store("content column type mismatch".to_string()));
+            return Err(Error::Store(StoreError::ContentColumnTypeMismatch));
          };
 
          let start_line = batch
@@ -827,41 +942,37 @@ impl super::Store for LanceStore {
             .unwrap()
             .value(row_idx);
 
-         let chunk_type = batch
-            .column_by_name("chunk_type")
-            .and_then(|col| {
-               if col.is_null(row_idx) {
-                  None
-               } else {
-                  col.as_any()
-                     .downcast_ref::<StringArray>()
-                     .map(|arr| Self::parse_chunk_type(arr.value(row_idx)))
-               }
-            });
+         let chunk_type = batch.column_by_name("chunk_type").and_then(|col| {
+            if col.is_null(row_idx) {
+               None
+            } else {
+               col.as_any()
+                  .downcast_ref::<StringArray>()
+                  .map(|arr| Self::parse_chunk_type(arr.value(row_idx)))
+            }
+         });
 
-         let is_anchor = batch
-            .column_by_name("is_anchor")
-            .and_then(|col| {
-               if col.is_null(row_idx) {
-                  None
-               } else {
-                  col.as_any()
-                     .downcast_ref::<BooleanArray>()
-                     .map(|arr| arr.value(row_idx))
-               }
-            });
+         let is_anchor = batch.column_by_name("is_anchor").and_then(|col| {
+            if col.is_null(row_idx) {
+               None
+            } else {
+               col.as_any()
+                  .downcast_ref::<BooleanArray>()
+                  .map(|arr| arr.value(row_idx))
+            }
+         });
 
          let vector_list = batch
             .column_by_name("vector")
             .unwrap()
             .as_any()
             .downcast_ref::<FixedSizeListArray>()
-            .ok_or_else(|| SmgrepError::Store("vector column type mismatch".to_string()))?;
+            .ok_or_else(|| Error::Store(StoreError::VectorColumnTypeMismatch))?;
          let vector_values = vector_list.value(row_idx);
          let vector_floats = vector_values
             .as_any()
             .downcast_ref::<Float32Array>()
-            .ok_or_else(|| SmgrepError::Store("vector values type mismatch".to_string()))?;
+            .ok_or_else(|| Error::Store(StoreError::VectorValuesTypeMismatch))?;
 
          let doc_vector: Vec<f32> = (0..vector_floats.len())
             .map(|i| vector_floats.value(i))
@@ -884,14 +995,13 @@ impl super::Store for LanceStore {
 
             if !colbert_binary.is_empty() {
                let scale = if let Some(scale_col) = batch.column_by_name("colbert_scale") {
-                  if !scale_col.is_null(row_idx) {
+                  if scale_col.is_null(row_idx) {
+                     1.0
+                  } else {
                      scale_col
                         .as_any()
                         .downcast_ref::<Float64Array>()
-                        .map(|arr| arr.value(row_idx))
-                        .unwrap_or(1.0)
-                  } else {
-                     1.0
+                        .map_or(1.0, |arr| arr.value(row_idx))
                   }
                } else {
                   1.0
@@ -927,7 +1037,7 @@ impl super::Store for LanceStore {
 
          scored_results.push(SearchResult {
             path,
-            content: full_content,
+            content: full_content.into(),
             score,
             start_line: adjusted_start_line,
             num_lines: end_line.saturating_sub(start_line).max(1),
@@ -946,20 +1056,18 @@ impl super::Store for LanceStore {
       Ok(SearchResponse { results: scored_results, status: SearchStatus::Ready, progress: None })
    }
 
-   async fn delete_file(&self, store_id: &str, file_path: &str) -> Result<()> {
+   async fn delete_file(&self, store_id: &str, file_path: &Path) -> Result<()> {
       let table = self.get_table(store_id).await?;
-      let escaped_path = file_path.replace('\'', "''");
-      let predicate = format!("path = '{}'", escaped_path);
-
+      let escaped = store::path_to_store_key(file_path);
       table
-         .delete(&predicate)
+         .delete(&format!("path = '{escaped}'"))
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to delete file: {}", e)))?;
+         .map_err(StoreError::DeleteFile)?;
 
       Ok(())
    }
 
-   async fn delete_files(&self, store_id: &str, file_paths: &[String]) -> Result<()> {
+   async fn delete_files(&self, store_id: &str, file_paths: &[PathBuf]) -> Result<()> {
       if file_paths.is_empty() {
          return Ok(());
       }
@@ -967,7 +1075,7 @@ impl super::Store for LanceStore {
       let table = self.get_table(store_id).await?;
       let unique_paths: Vec<_> = file_paths
          .iter()
-         .collect::<std::collections::HashSet<_>>()
+         .collect::<HashSet<_>>()
          .into_iter()
          .collect();
 
@@ -975,14 +1083,14 @@ impl super::Store for LanceStore {
       for chunk in unique_paths.chunks(BATCH_SIZE) {
          let escaped: Vec<String> = chunk
             .iter()
-            .map(|p| format!("'{}'", p.replace('\'', "''")))
+            .map(|p| format!("'{}'", store::path_to_store_key(p)))
             .collect();
          let predicate = format!("path IN ({})", escaped.join(","));
 
          table
             .delete(&predicate)
             .await
-            .map_err(|e| SmgrepError::Store(format!("failed to delete files: {}", e)))?;
+            .map_err(StoreError::DeleteFiles)?;
       }
 
       Ok(())
@@ -994,7 +1102,7 @@ impl super::Store for LanceStore {
       conn
          .drop_table(store_id, &[])
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to drop table: {}", e)))?;
+         .map_err(StoreError::DropTable)?;
 
       self.connections.write().remove(store_id);
 
@@ -1006,7 +1114,7 @@ impl super::Store for LanceStore {
       let row_count = table
          .count_rows(None)
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to count rows: {}", e)))?;
+         .map_err(StoreError::CountRows)?;
 
       Ok(StoreInfo {
          store_id:  store_id.to_string(),
@@ -1015,7 +1123,7 @@ impl super::Store for LanceStore {
       })
    }
 
-   async fn list_files(&self, store_id: &str) -> Result<Vec<String>> {
+   async fn list_files(&self, store_id: &str) -> Result<Vec<PathBuf>> {
       let table = match self.get_table(store_id).await {
          Ok(t) => t,
          Err(_) => return Ok(vec![]),
@@ -1024,7 +1132,7 @@ impl super::Store for LanceStore {
       let stream_result = table
          .query()
          .only_if("is_anchor = true")
-         .select(lancedb::query::Select::Columns(vec!["path".to_string()]))
+         .select(Select::Columns(vec!["path".to_string()]))
          .execute()
          .await;
 
@@ -1032,19 +1140,19 @@ impl super::Store for LanceStore {
          Ok(s) => s,
          Err(_) => table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["path".to_string()]))
+            .select(Select::Columns(vec!["path".to_string()]))
             .execute()
             .await
-            .map_err(|e| SmgrepError::Store(format!("failed to execute query: {}", e)))?,
+            .map_err(StoreError::ExecuteQuery)?,
       };
 
       let batches: Vec<RecordBatch> = stream
          .try_collect()
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to collect results: {}", e)))?;
+         .map_err(StoreError::CollectResults)?;
 
       let mut paths = Vec::new();
-      let mut seen = std::collections::HashSet::new();
+      let mut seen = HashSet::new();
 
       for batch in batches {
          if let Some(path_col) = batch.column_by_name("path")
@@ -1052,7 +1160,7 @@ impl super::Store for LanceStore {
          {
             for i in 0..path_array.len() {
                if !path_array.is_null(i) {
-                  let path = path_array.value(i).to_string();
+                  let path: PathBuf = path_array.value(i).into();
                   if seen.insert(path.clone()) {
                      paths.push(path);
                   }
@@ -1073,7 +1181,7 @@ impl super::Store for LanceStore {
       let row_count = table
          .count_rows(None)
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to count rows: {}", e)))?;
+         .map_err(StoreError::CountRows)?;
 
       Ok(row_count == 0)
    }
@@ -1082,15 +1190,14 @@ impl super::Store for LanceStore {
       let table = self.get_table(store_id).await?;
 
       table
-         .create_index(&["content"], lancedb::index::Index::FTS(Default::default()))
+         .create_index(&["content"], Index::FTS(Default::default()))
          .execute()
          .await
          .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("already exists") {
-               return SmgrepError::Store("index already exists".to_string());
+            if matches!(e, lancedb::Error::TableAlreadyExists { .. }) {
+               return StoreError::IndexAlreadyExists;
             }
-            SmgrepError::Store(format!("failed to create FTS index: {}", e))
+            StoreError::CreateFtsIndex(e)
          })?;
 
       Ok(())
@@ -1102,7 +1209,7 @@ impl super::Store for LanceStore {
       let row_count = table
          .count_rows(None)
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to count rows: {}", e)))?;
+         .map_err(StoreError::CountRows)?;
 
       if row_count < 4000 {
          return Ok(());
@@ -1110,7 +1217,7 @@ impl super::Store for LanceStore {
 
       let num_partitions = (row_count / 100).max(8).min(64) as u32;
 
-      let index = lancedb::index::Index::IvfPq(
+      let index = Index::IvfPq(
          lancedb::index::vector::IvfPqIndexBuilder::default().num_partitions(num_partitions),
       );
 
@@ -1119,17 +1226,16 @@ impl super::Store for LanceStore {
          .execute()
          .await
          .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("already exists") {
-               return SmgrepError::Store("index already exists".to_string());
+            if matches!(e, lancedb::Error::TableAlreadyExists { .. }) {
+               return StoreError::IndexAlreadyExists;
             }
-            SmgrepError::Store(format!("failed to create vector index: {}", e))
+            StoreError::CreateVectorIndex(e)
          })?;
 
       Ok(())
    }
 
-   async fn get_file_hashes(&self, store_id: &str) -> Result<HashMap<String, String>> {
+   async fn get_file_hashes(&self, store_id: &str) -> Result<HashMap<PathBuf, FileHash>> {
       let table = match self.get_table(store_id).await {
          Ok(t) => t,
          Err(_) => return Ok(HashMap::new()),
@@ -1138,7 +1244,7 @@ impl super::Store for LanceStore {
       let stream_result = table
          .query()
          .only_if("is_anchor = true")
-         .select(lancedb::query::Select::Columns(vec!["path".to_string(), "hash".to_string()]))
+         .select(Select::Columns(vec!["path".to_string(), "hash".to_string()]))
          .execute()
          .await;
 
@@ -1146,16 +1252,16 @@ impl super::Store for LanceStore {
          Ok(s) => s,
          Err(_) => table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["path".to_string(), "hash".to_string()]))
+            .select(Select::Columns(vec!["path".to_string(), "hash".to_string()]))
             .execute()
             .await
-            .map_err(|e| SmgrepError::Store(format!("failed to execute query: {}", e)))?,
+            .map_err(StoreError::ExecuteQuery)?,
       };
 
       let batches: Vec<RecordBatch> = stream
          .try_collect()
          .await
-         .map_err(|e| SmgrepError::Store(format!("failed to collect results: {}", e)))?;
+         .map_err(StoreError::CollectResults)?;
 
       let mut hashes = HashMap::new();
 
@@ -1164,13 +1270,13 @@ impl super::Store for LanceStore {
             (batch.column_by_name("path"), batch.column_by_name("hash"))
             && let (Some(path_array), Some(hash_array)) = (
                path_col.as_any().downcast_ref::<StringArray>(),
-               hash_col.as_any().downcast_ref::<StringArray>(),
+               hash_col.as_any().downcast_ref::<BinaryArray>(),
             )
          {
             for i in 0..path_array.len() {
                if !path_array.is_null(i) && !hash_array.is_null(i) {
-                  let path = path_array.value(i).to_string();
-                  let hash = hash_array.value(i).to_string();
+                  let path = path_array.value(i).into();
+                  let hash = FileHash::from_slice(hash_array.value(i)).expect("invalid hash");
                   hashes.insert(path, hash);
                }
             }

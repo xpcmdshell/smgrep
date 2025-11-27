@@ -1,23 +1,50 @@
-use std::{sync::Arc, thread, time::Duration};
-
-use crossbeam_channel::{Sender, bounded};
-use parking_lot::Mutex;
-
-use crate::{
-   config,
-   embed::{CandleEmbedder, Embedder, HybridEmbedding},
-   error::{Result, SmgrepError},
+use std::{
+   sync::{
+      Arc,
+      atomic::{AtomicU64, Ordering},
+   },
+   time::Duration,
 };
 
-enum WorkerMessage {
-   Compute { texts: Vec<String>, response: Sender<Result<Vec<HybridEmbedding>>> },
-   Shutdown,
+use futures::{StreamExt, stream::FuturesUnordered};
+use smallvec::SmallVec;
+use tokio::{
+   sync::oneshot,
+   task::JoinHandle,
+   time::{Instant, MissedTickBehavior},
+};
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+   Str, config,
+   embed::{CandleEmbedder, Embedder, HybridEmbedding, QueryEmbedding, candle::EmbeddingError},
+   error::Result,
+};
+
+struct WorkerMessage {
+   chunk: SmallVec<[Str; 4]>,
+   tx:    oneshot::Sender<Result<Vec<HybridEmbedding>>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(transparent)]
+struct RelativeClock(Instant);
+
+impl RelativeClock {
+   fn new() -> Self {
+      Self(Instant::now())
+   }
+
+   fn time(&self) -> u64 {
+      self.0.elapsed().as_millis() as u64
+   }
 }
 
 pub struct EmbedWorker {
-   workers:    Option<Vec<thread::JoinHandle<()>>>,
-   sender:     Sender<WorkerMessage>,
-   batch_size: usize,
+   workers:      Option<Vec<JoinHandle<()>>>,
+   sender:       flume::Sender<WorkerMessage>,
+   cancel_token: CancellationToken,
+   batch_size:   usize,
 }
 
 impl EmbedWorker {
@@ -26,68 +53,75 @@ impl EmbedWorker {
       let num_threads = cfg.default_threads();
       let batch_sz = cfg.batch_size();
       let timeout = Duration::from_millis(cfg.worker_timeout_ms);
+      let embedder = Arc::new(CandleEmbedder::new()?);
 
-      let (tx, rx) = bounded::<WorkerMessage>(num_threads * 2);
-      let rx = Arc::new(Mutex::new(rx));
+      let (tx, rx) = flume::bounded(num_threads * 2);
 
       let mut workers = Vec::with_capacity(num_threads);
 
+      let t0 = RelativeClock::new();
+      let cancel_token = CancellationToken::new();
+      let last_message = Arc::new(AtomicU64::new(0));
+
       for worker_id in 0..num_threads {
-         let rx = Arc::clone(&rx);
-         let timeout_duration = timeout;
-
-         let handle = thread::spawn(move || {
-            let embedder = match CandleEmbedder::new() {
-               Ok(e) => e,
-               Err(e) => {
-                  tracing::error!(worker_id, "failed to initialize embedder: {}", e);
-                  return;
-               },
-            };
-
+         let timeout_ms = cfg.worker_timeout_ms;
+         let cancel_token = cancel_token.clone();
+         let last_message = last_message.clone();
+         let embedder = embedder.clone();
+         let mut rx = rx.clone().into_stream();
+         let handle = tokio::spawn(async move {
+            let mut timer = tokio::time::interval(timeout);
+            timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
             tracing::debug!(worker_id, "embedding worker started");
 
+            let mut ops = FuturesUnordered::new();
+
             loop {
-               let msg = {
-                  let guard = rx.lock();
-                  match guard.recv_timeout(timeout_duration) {
-                     Ok(msg) => msg,
-                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                        continue;
-                     },
-                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                        tracing::debug!(worker_id, "channel disconnected, shutting down");
-                        break;
-                     },
+               // if we have more than 10 operations, wait for one to complete
+               if ops.len() > 10 {
+                  ops.next().await;
+                  continue;
+               }
+
+               // Receive a message from the channel
+               let msg: WorkerMessage = tokio::select! {
+                  _ = ops.next() => {
+                     // An operation completed
+                     continue;
+                  }
+                  Some(msg) = rx.next() => {
+                     // Update the last message time
+                     last_message.fetch_max(t0.time(), Ordering::Relaxed);
+                     msg
+                  }
+                  _ = timer.tick() => {
+                     // Check if the timeout has been exceeded
+                     let now = t0.time();
+                     let last_msg = last_message.load(Ordering::Relaxed);
+                     if now - last_msg > timeout_ms {
+                        // Cancel the token if the timeout has been exceeded
+                        cancel_token.cancel();
+                     }
+                     continue;
+                  }
+                  () = cancel_token.cancelled() => {
+                     // Cancel the token if the worker has been cancelled
+                     tracing::debug!(worker_id, "embedding worker cancelled");
+                     break;
+                  }
+                  else => {
+                     // The channel has been disconnected, shut down the worker
+                     tracing::error!(worker_id, "channel disconnected, shutting down");
+                     break;
                   }
                };
 
-               match msg {
-                  WorkerMessage::Compute { texts, response } => {
-                     let result = tokio::runtime::Handle::try_current()
-                        .ok()
-                        .map(|handle| {
-                           handle.block_on(async { embedder.compute_hybrid(&texts).await })
-                        })
-                        .unwrap_or_else(|| {
-                           tokio::runtime::Runtime::new()
-                              .map_err(|e| {
-                                 SmgrepError::Embedding(format!("failed to create runtime: {}", e))
-                              })
-                              .and_then(|rt| {
-                                 rt.block_on(async { embedder.compute_hybrid(&texts).await })
-                              })
-                        });
-
-                     if response.send(result).is_err() {
-                        tracing::warn!(worker_id, "failed to send result, receiver dropped");
-                     }
-                  },
-                  WorkerMessage::Shutdown => {
-                     tracing::debug!(worker_id, "received shutdown signal");
-                     break;
-                  },
-               }
+               // Compute the embeddings
+               let embedder = embedder.clone();
+               ops.push(async move {
+                  let result = embedder.compute_hybrid(&msg.chunk).await;
+                  _ = msg.tx.send(result);
+               });
             }
 
             tracing::debug!(worker_id, "worker shut down");
@@ -96,69 +130,47 @@ impl EmbedWorker {
          workers.push(handle);
       }
 
-      Ok(Self { workers: Some(workers), sender: tx, batch_size: batch_sz })
+      Ok(Self { workers: Some(workers), sender: tx, batch_size: batch_sz, cancel_token })
    }
 
-   pub fn compute_batch(&self, texts: Vec<String>) -> Result<Vec<HybridEmbedding>> {
+   pub async fn compute_hybrid(&self, texts: &[Str]) -> Result<Vec<HybridEmbedding>> {
       if texts.is_empty() {
          return Ok(Vec::new());
       }
 
-      let chunks: Vec<Vec<String>> = texts
+      let rxs: Vec<oneshot::Receiver<_>> = texts
          .chunks(self.batch_size)
-         .map(|chunk| chunk.to_vec())
-         .collect();
+         .map(|chunk| {
+            let (tx, rx) = oneshot::channel();
+            self
+               .sender
+               .send(WorkerMessage { chunk: chunk.iter().cloned().collect(), tx })
+               .map_err(|_| EmbeddingError::WorkerClosed)?;
+            Ok(rx)
+         })
+         .collect::<Result<Vec<_>>>()?;
 
-      let mut all_results = Vec::with_capacity(texts.len());
-
-      for chunk in chunks {
-         let (response_tx, response_rx) = bounded(1);
-
-         self
-            .sender
-            .send(WorkerMessage::Compute { texts: chunk, response: response_tx })
-            .map_err(|e| SmgrepError::Embedding(format!("failed to send work: {}", e)))?;
-
-         let result = response_rx
-            .recv()
-            .map_err(|e| SmgrepError::Embedding(format!("failed to receive result: {}", e)))??;
-
-         all_results.extend(result);
+      let mut messages = Vec::with_capacity(texts.len());
+      for rx in rxs {
+         messages.extend(rx.await.map_err(|_| EmbeddingError::WorkCancelled)??);
       }
-
-      Ok(all_results)
-   }
-
-   pub fn shutdown(mut self) {
-      if let Some(workers) = self.workers.take() {
-         for _ in 0..workers.len() {
-            let _ = self.sender.send(WorkerMessage::Shutdown);
-         }
-
-         for handle in workers {
-            let _ = handle.join();
-         }
-      }
+      Ok(messages)
    }
 }
 
 impl Drop for EmbedWorker {
    fn drop(&mut self) {
-      if let Some(workers) = &self.workers {
-         for _ in 0..workers.len() {
-            let _ = self.sender.send(WorkerMessage::Shutdown);
-         }
-      }
+      self.cancel_token.cancel();
    }
 }
 
 #[async_trait::async_trait]
 impl Embedder for EmbedWorker {
-   async fn compute_hybrid(&self, texts: &[String]) -> Result<Vec<HybridEmbedding>> {
-      self.compute_batch(texts.to_vec())
+   async fn compute_hybrid(&self, texts: &[Str]) -> Result<Vec<HybridEmbedding>> {
+      Self::compute_hybrid(self, texts).await
    }
 
-   async fn encode_query(&self, text: &str) -> Result<crate::embed::QueryEmbedding> {
+   async fn encode_query(&self, text: &str) -> Result<QueryEmbedding> {
       let embedder = CandleEmbedder::new()?;
       embedder.encode_query(text).await
    }
@@ -181,7 +193,7 @@ mod tests {
    #[tokio::test]
    async fn test_compute_empty() {
       let worker = EmbedWorker::new().unwrap();
-      let result = worker.compute_batch(vec![]);
+      let result = worker.compute_hybrid(&[]).await;
       assert!(result.is_ok());
       assert_eq!(result.unwrap().len(), 0);
    }

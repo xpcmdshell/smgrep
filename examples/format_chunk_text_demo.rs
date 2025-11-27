@@ -1,16 +1,13 @@
 use smgrep::format::format_chunk_text;
 
 fn main() {
-   let context = vec![
-      "class UserService".to_string(),
-      "method authenticate".to_string(),
-   ];
+   let context = vec!["class UserService".to_string(), "method authenticate".to_string()];
    let file_path = "src/auth.rs";
    let content = "pub fn authenticate() {\n    verify_token()\n}";
 
    let result = format_chunk_text(&context, file_path, content);
    println!("Example 1 - With context:");
-   println!("{}\n", result);
+   println!("{result}\n");
 
    let context = vec!["File: src/lib.rs".to_string(), "module network".to_string()];
    let file_path = "src/lib.rs";
@@ -18,7 +15,7 @@ fn main() {
 
    let result = format_chunk_text(&context, file_path, content);
    println!("Example 2 - File label already present:");
-   println!("{}\n", result);
+   println!("{result}\n");
 
    let context: Vec<String> = vec![];
    let file_path = "test.rs";
@@ -26,7 +23,7 @@ fn main() {
 
    let result = format_chunk_text(&context, file_path, content);
    println!("Example 3 - Empty context:");
-   println!("{}\n", result);
+   println!("{result}\n");
 
    let context = vec!["function main".to_string()];
    let file_path = "";
@@ -34,5 +31,5 @@ fn main() {
 
    let result = format_chunk_text(&context, file_path, content);
    println!("Example 4 - Empty file path:");
-   println!("{}\n", result);
+   println!("{result}\n");
 }

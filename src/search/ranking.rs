@@ -1,18 +1,21 @@
-use std::collections::HashMap;
+use std::{
+   collections::HashMap,
+   path::{Path, PathBuf},
+};
 
 use crate::types::{ChunkType, SearchResult};
 
 pub fn apply_structural_boost(results: &mut [SearchResult]) {
    for result in results.iter_mut() {
-      match result.chunk_type {
-         Some(ChunkType::Function)
-         | Some(ChunkType::Class)
-         | Some(ChunkType::Interface)
-         | Some(ChunkType::Method)
-         | Some(ChunkType::TypeAlias) => {
-            result.score *= 1.25;
-         },
-         _ => {},
+      if let Some(
+         ChunkType::Function
+         | ChunkType::Class
+         | ChunkType::Interface
+         | ChunkType::Method
+         | ChunkType::TypeAlias,
+      ) = result.chunk_type
+      {
+         result.score *= 1.25;
       }
 
       if is_test_file(&result.path) {
@@ -26,22 +29,19 @@ pub fn apply_structural_boost(results: &mut [SearchResult]) {
 }
 
 pub fn deduplicate(results: Vec<SearchResult>) -> Vec<SearchResult> {
-   let mut seen: HashMap<(String, u32), usize> = HashMap::new();
+   let mut seen: HashMap<(PathBuf, u32), usize> = HashMap::new();
    let mut deduplicated: Vec<SearchResult> = Vec::with_capacity(results.len());
 
    for result in results {
       let key = (result.path.clone(), result.start_line);
 
-      match seen.get(&key) {
-         Some(&idx) => {
-            if result.score > deduplicated[idx].score {
-               deduplicated[idx] = result;
-            }
-         },
-         None => {
-            seen.insert(key, deduplicated.len());
-            deduplicated.push(result);
-         },
+      if let Some(&idx) = seen.get(&key) {
+         if result.score > deduplicated[idx].score {
+            deduplicated[idx] = result;
+         }
+      } else {
+         seen.insert(key, deduplicated.len());
+         deduplicated.push(result);
       }
    }
 
@@ -49,7 +49,7 @@ pub fn deduplicate(results: Vec<SearchResult>) -> Vec<SearchResult> {
 }
 
 pub fn apply_per_file_limit(results: Vec<SearchResult>, limit: usize) -> Vec<SearchResult> {
-   let mut by_path: HashMap<String, Vec<SearchResult>> = HashMap::new();
+   let mut by_path: HashMap<PathBuf, Vec<SearchResult>> = HashMap::new();
 
    for result in results {
       by_path.entry(result.path.clone()).or_default().push(result);
@@ -75,13 +75,19 @@ pub fn apply_per_file_limit(results: Vec<SearchResult>, limit: usize) -> Vec<Sea
    final_results
 }
 
-fn is_test_file(path: &str) -> bool {
-   let lower = path.to_lowercase();
+fn is_test_file(path: &Path) -> bool {
+   let Some(path_str) = path.to_str() else {
+      return false;
+   };
+   let lower = path_str.to_lowercase();
    lower.contains(".test.") || lower.contains(".spec.") || lower.contains("__tests__")
 }
 
-fn is_doc_or_config(path: &str) -> bool {
-   let lower = path.to_lowercase();
+fn is_doc_or_config(path: &Path) -> bool {
+   let Some(path_str) = path.to_str() else {
+      return false;
+   };
+   let lower = path_str.to_lowercase();
    lower.ends_with(".md")
       || lower.ends_with(".mdx")
       || lower.ends_with(".txt")
@@ -95,11 +101,12 @@ fn is_doc_or_config(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use crate::Str;
 
    fn make_result(path: &str, start_line: u32, score: f32, chunk_type: ChunkType) -> SearchResult {
       SearchResult {
-         path: path.to_string(),
-         content: String::new(),
+         path: PathBuf::from(path),
+         content: Str::default(),
          score,
          start_line,
          num_lines: 10,
@@ -136,7 +143,7 @@ mod tests {
       let deduped = deduplicate(results);
       assert_eq!(deduped.len(), 2);
       assert!((deduped[0].score - 2.0).abs() < 1e-6);
-      assert_eq!(deduped[0].path, "src/main.rs");
+      assert_eq!(deduped[0].path, Path::new("src/main.rs"));
    }
 
    #[test]
@@ -151,24 +158,27 @@ mod tests {
       let limited = apply_per_file_limit(results, 2);
       assert_eq!(limited.len(), 3);
 
-      let file1_count = limited.iter().filter(|r| r.path == "file1.rs").count();
+      let file1_count = limited
+         .iter()
+         .filter(|r| r.path == Path::new("file1.rs"))
+         .count();
       assert_eq!(file1_count, 2);
    }
 
    #[test]
    fn test_is_test_file() {
-      assert!(is_test_file("src/main.test.ts"));
-      assert!(is_test_file("src/component.spec.js"));
-      assert!(is_test_file("src/__tests__/utils.js"));
-      assert!(!is_test_file("src/main.rs"));
+      assert!(is_test_file(Path::new("src/main.test.ts")));
+      assert!(is_test_file(Path::new("src/component.spec.js")));
+      assert!(is_test_file(Path::new("src/__tests__/utils.js")));
+      assert!(!is_test_file(Path::new("src/main.rs")));
    }
 
    #[test]
    fn test_is_doc_or_config() {
-      assert!(is_doc_or_config("README.md"));
-      assert!(is_doc_or_config("package.json"));
-      assert!(is_doc_or_config("config.yaml"));
-      assert!(is_doc_or_config("docs/guide.md"));
-      assert!(!is_doc_or_config("src/main.rs"));
+      assert!(is_doc_or_config(Path::new("README.md")));
+      assert!(is_doc_or_config(Path::new("package.json")));
+      assert!(is_doc_or_config(Path::new("config.yaml")));
+      assert!(is_doc_or_config(Path::new("docs/guide.md")));
+      assert!(!is_doc_or_config(Path::new("src/main.rs")));
    }
 }

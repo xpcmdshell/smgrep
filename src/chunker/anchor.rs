@@ -1,9 +1,12 @@
 use std::path::Path;
 
-use crate::types::{Chunk, ChunkType};
+use crate::{
+   Str,
+   types::{Chunk, ChunkType},
+};
 
-pub fn create_anchor_chunk(content: &str, path: &Path) -> Chunk {
-   let lines: Vec<&str> = content.lines().collect();
+pub fn create_anchor_chunk(content: &Str, path: &Path) -> Chunk {
+   let lines: Vec<&str> = content.as_str().lines().collect();
    let top_comments = extract_top_comments(&lines);
    let imports = extract_imports(&lines);
    let exports = extract_exports(&lines);
@@ -50,10 +53,11 @@ pub fn create_anchor_chunk(content: &str, path: &Path) -> Chunk {
    let anchor_text = sections.join("\n\n");
    let approx_end_line = lines.len().min(non_blank.max(preamble.len()).max(5));
 
-   let mut chunk = Chunk::new(anchor_text, 0, approx_end_line, ChunkType::Block, vec![
-      format!("File: {}", path.display()),
-      "Anchor".to_string(),
-   ]);
+   let mut chunk =
+      Chunk::new(Str::from_string(anchor_text), 0, approx_end_line, ChunkType::Block, &[
+         format!("File: {}", path.display()).into(),
+         "Anchor".into(),
+      ]);
    chunk.chunk_index = Some(-1);
    chunk.is_anchor = Some(true);
    chunk
