@@ -95,6 +95,9 @@ enum Commands {
    Doctor,
 
    List,
+
+   #[command(name = "install-claude-code")]
+   InstallClaudeCode,
 }
 
 #[tokio::main]
@@ -144,6 +147,7 @@ async fn main() -> Result<()> {
       Some(Commands::Setup) => commands::setup::execute().await,
       Some(Commands::Doctor) => commands::doctor::execute().await,
       Some(Commands::List) => commands::list::execute().await,
+      Some(Commands::InstallClaudeCode) => commands::install_claude::execute().await,
       None => {
          eprintln!("No command or query provided. Use --help for usage information.");
          std::process::exit(1);

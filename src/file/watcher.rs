@@ -13,10 +13,8 @@ pub enum WatchAction {
 }
 
 pub struct FileWatcher {
-   debouncer:       Option<Debouncer<RecommendedWatcher>>,
-   pending:         Arc<Mutex<HashMap<PathBuf, WatchAction>>>,
-   root:            PathBuf,
-   ignore_patterns: Arc<IgnorePatterns>,
+   debouncer: Option<Debouncer<RecommendedWatcher>>,
+   root:      PathBuf,
 }
 
 impl FileWatcher {
@@ -44,7 +42,12 @@ impl FileWatcher {
                      continue;
                   }
 
-                  pending_map.insert(path, WatchAction::Upsert);
+                  let action = if path.exists() {
+                     WatchAction::Upsert
+                  } else {
+                     WatchAction::Delete
+                  };
+                  pending_map.insert(path, action);
                }
 
                let changes: Vec<(PathBuf, WatchAction)> = pending_map.drain().collect();
@@ -60,7 +63,7 @@ impl FileWatcher {
 
       debouncer.watcher().watch(&root, RecursiveMode::Recursive)?;
 
-      Ok(Self { debouncer: Some(debouncer), pending, root, ignore_patterns })
+      Ok(Self { debouncer: Some(debouncer), root })
    }
 
    pub fn stop(&mut self) {

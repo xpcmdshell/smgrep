@@ -30,8 +30,6 @@ use crate::{
    types::{PreparedChunk, VectorRecord},
 };
 
-const MAX_REQUEST_BYTES: usize = 10 * 1024 * 1024;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerLock {
    pub port:       u16,
@@ -85,7 +83,6 @@ struct ServerState {
    root:       PathBuf,
    indexing:   Arc<AtomicBool>,
    progress:   Arc<AtomicU8>,
-   meta_store: Arc<parking_lot::Mutex<MetaStore>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,7 +226,6 @@ fn format_dense_snippet(content: &str) -> String {
 enum ApiError {
    Unauthorized,
    BadRequest(String),
-   PayloadTooLarge,
    Internal(String),
 }
 
@@ -238,9 +234,6 @@ impl IntoResponse for ApiError {
       let (status, message) = match self {
          ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
          ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-         ApiError::PayloadTooLarge => {
-            (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large".to_string())
-         },
          ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
       };
 
@@ -325,7 +318,6 @@ pub async fn execute(port: u16, path: Option<PathBuf>, store_id: Option<String>)
       root:       serve_path.clone(),
       indexing:   Arc::clone(&indexing),
       progress:   Arc::clone(&progress),
-      meta_store: Arc::clone(&meta_store_arc),
    };
 
    let _watcher = start_watcher(

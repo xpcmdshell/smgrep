@@ -33,7 +33,7 @@ pub async fn execute() -> Result<()> {
          let modified = metadata.modified()?;
          let size = get_dir_size(&path)?;
 
-         stores.push(StoreInfo { name: name.to_string(), path, size, modified });
+         stores.push(StoreInfo { name: name.to_string(), size, modified });
       }
    }
 
@@ -73,7 +73,6 @@ pub async fn execute() -> Result<()> {
 
 struct StoreInfo {
    name:     String,
-   path:     PathBuf,
    size:     u64,
    modified: SystemTime,
 }

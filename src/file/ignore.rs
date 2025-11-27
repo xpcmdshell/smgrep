@@ -6,15 +6,25 @@ const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
    "node_modules",
    "dist",
    "build",
+   "out",
    "target",
    "__pycache__",
    ".git",
    ".venv",
+   "venv",
    "*.lock",
+   "*.bin",
+   "*.ipynb",
+   "*.pyc",
+   "*.txt",
+   "*.onnx",
    "package-lock.json",
    "yarn.lock",
    "pnpm-lock.yaml",
+   "bun.lockb",
+   "composer.lock",
    "Cargo.lock",
+   "Gemfile.lock",
    "*.min.js",
    "*.min.css",
    "*.map",
@@ -45,6 +55,11 @@ impl IgnorePatterns {
          let _ = builder.add(&rsgrep_ignore);
       }
 
+      let osgrep_ignore = root.join(".osgrepignore");
+      if osgrep_ignore.exists() {
+         let _ = builder.add(&osgrep_ignore);
+      }
+
       Self { gitignore: builder.build().ok() }
    }
 
@@ -69,9 +84,19 @@ mod tests {
    fn default_patterns_loaded() {
       let tmp = TempDir::new().unwrap();
       let ignore = IgnorePatterns::new(tmp.path());
+
+      fs::create_dir_all(tmp.path().join("node_modules")).unwrap();
+      fs::create_dir_all(tmp.path().join("dist")).unwrap();
+      fs::create_dir_all(tmp.path().join("src")).unwrap();
+
       let node_modules = tmp.path().join("node_modules").join("package");
       let dist = tmp.path().join("dist").join("main.js");
       let src = tmp.path().join("src").join("main.rs");
+
+      fs::write(&node_modules, "").unwrap();
+      fs::write(&dist, "").unwrap();
+      fs::write(&src, "").unwrap();
+
       assert!(ignore.is_ignored(&node_modules));
       assert!(ignore.is_ignored(&dist));
       assert!(!ignore.is_ignored(&src));
@@ -135,12 +160,12 @@ mod tests {
       fs::create_dir(&rsgrep_dir).unwrap();
 
       let ignore_file = rsgrep_dir.join("ignore");
-      fs::write(&ignore_file, "/root.txt\n").unwrap();
+      fs::write(&ignore_file, "/root.config\n").unwrap();
 
       let ignore = IgnorePatterns::new(tmp.path());
 
-      let root_file = tmp.path().join("root.txt");
-      let nested_file = tmp.path().join("nested").join("root.txt");
+      let root_file = tmp.path().join("root.config");
+      let nested_file = tmp.path().join("nested").join("root.config");
       fs::write(&root_file, "").unwrap();
       fs::create_dir(tmp.path().join("nested")).unwrap();
       fs::write(&nested_file, "").unwrap();

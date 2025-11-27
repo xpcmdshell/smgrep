@@ -22,13 +22,9 @@ pub async fn execute(
    let root = std::env::current_dir().context("failed to get current directory")?;
    let index_path = path.unwrap_or_else(|| root.clone());
 
-   let resolved_store_id = store_id.unwrap_or_else(|| {
-      index_path
-         .file_name()
-         .and_then(|s| s.to_str())
-         .unwrap_or("default")
-         .to_string()
-   });
+   let resolved_store_id = store_id
+      .map(Ok)
+      .unwrap_or_else(|| crate::git::resolve_store_id(&index_path))?;
 
    if reset {
       println!("{}", style(format!("Resetting index for store: {}", resolved_store_id)).yellow());

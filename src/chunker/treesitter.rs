@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use regex::Regex;
 use tree_sitter::{Language, Parser};
 
 use crate::{
@@ -11,12 +12,17 @@ use crate::{
 };
 
 pub struct TreeSitterChunker {
-   parser: Parser,
+   parser:                  Parser,
+   screaming_const_pattern: Regex,
 }
 
 impl TreeSitterChunker {
    pub fn new() -> Self {
-      Self { parser: Parser::new() }
+      Self {
+         parser:                  Parser::new(),
+         screaming_const_pattern: Regex::new(r"(?:^|\n)\s*(?:export\s+)?const\s+[A-Z0-9_]+\s*=")
+            .unwrap(),
+      }
    }
 
    fn get_language(&self, path: &Path) -> Option<Language> {
@@ -145,7 +151,7 @@ impl TreeSitterChunker {
          );
 
          let effective = self.unwrap_export(&child);
-         let is_definition = self.is_definition_node(&effective);
+         let is_definition = self.is_definition_node(&effective, content);
 
          if is_definition {
             if child.start_byte() > cursor_index {
@@ -203,7 +209,7 @@ impl TreeSitterChunker {
       saw_definition: &mut bool,
    ) {
       let effective = self.unwrap_export(node);
-      let is_definition = self.is_definition_node(&effective);
+      let is_definition = self.is_definition_node(&effective, content);
       let mut next_stack = stack.to_vec();
 
       if is_definition {
@@ -239,7 +245,7 @@ impl TreeSitterChunker {
       *node
    }
 
-   fn is_definition_node(&self, node: &tree_sitter::Node) -> bool {
+   fn is_definition_node(&self, node: &tree_sitter::Node, content: &str) -> bool {
       let kind = node.kind();
       matches!(
          kind,
@@ -252,10 +258,10 @@ impl TreeSitterChunker {
             | "interface_declaration"
             | "type_alias_declaration"
             | "type_declaration"
-      ) || self.is_top_level_value_def(node)
+      ) || self.is_top_level_value_def(node, content)
    }
 
-   fn is_top_level_value_def(&self, node: &tree_sitter::Node) -> bool {
+   fn is_top_level_value_def(&self, node: &tree_sitter::Node, content: &str) -> bool {
       let kind = node.kind();
       if kind != "lexical_declaration" && kind != "variable_declaration" {
          return false;
@@ -268,7 +274,23 @@ impl TreeSitterChunker {
          }
       }
 
-      true
+      let text = &content[node.start_byte()..node.end_byte()];
+
+      if text.contains("=>") {
+         return true;
+      }
+      if text.contains("function ") {
+         return true;
+      }
+      if text.contains("class ") {
+         return true;
+      }
+
+      if self.screaming_const_pattern.is_match(text) {
+         return true;
+      }
+
+      false
    }
 
    fn classify_node(&self, node: &tree_sitter::Node) -> ChunkType {
@@ -279,8 +301,6 @@ impl TreeSitterChunker {
          ChunkType::Interface
       } else if kind.contains("type_alias") || kind.contains("type_declaration") {
          ChunkType::TypeAlias
-      } else if self.is_definition_node(node) {
-         ChunkType::Function
       } else {
          ChunkType::Other
       }
@@ -337,7 +357,7 @@ impl TreeSitterChunker {
          Some(format!("Type: {}", name.as_deref().unwrap_or("<anonymous type>")))
       } else if kind.contains("function") {
          Some(format!("Function: {}", name.as_deref().unwrap_or("<anonymous function>")))
-      } else if self.is_top_level_value_def(node) {
+      } else if self.is_top_level_value_def(node, content) {
          Some(format!("Function: {}", name.as_deref().unwrap_or("<anonymous function>")))
       } else {
          name.map(|n| format!("Symbol: {}", n))
@@ -409,41 +429,27 @@ impl TreeSitterChunker {
 
       let mut i = 0;
       while i < content.len() {
-         let end = content
-            .char_indices()
-            .map(|(idx, _)| idx)
-            .filter(|&idx| idx <= i + MAX_CHARS)
-            .last()
-            .unwrap_or(content.len())
-            .min(content.len());
-
+         let end = content.ceil_char_boundary(i + MAX_CHARS).min(content.len());
          if end <= i {
             break;
          }
 
-         let sub = &content[i..end];
-         if sub.trim().is_empty() {
-            break;
-         }
+         let sub = &content[i..end].trim();
 
          let prefix_lines = content[..i].lines().count();
          let sub_line_count = sub.lines().count();
 
-         chunks.push(Chunk::new(
-            sub.to_string(),
-            chunk.start_line + prefix_lines,
-            chunk.start_line + prefix_lines + sub_line_count,
-            chunk.chunk_type.unwrap_or(ChunkType::Other),
-            chunk.context.clone(),
-         ));
+         if !sub.is_empty() {
+            chunks.push(Chunk::new(
+               sub.to_string(),
+               chunk.start_line + prefix_lines,
+               chunk.start_line + prefix_lines + sub_line_count,
+               chunk.chunk_type.unwrap_or(ChunkType::Other),
+               chunk.context.clone(),
+            ));
+         }
 
-         let next_i = content
-            .char_indices()
-            .map(|(idx, _)| idx)
-            .filter(|&idx| idx >= i + stride)
-            .next()
-            .unwrap_or(content.len());
-         i = next_i;
+         i = content.ceil_char_boundary(i + stride).min(content.len());
       }
 
       chunks

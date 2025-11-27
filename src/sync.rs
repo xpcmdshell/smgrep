@@ -31,7 +31,7 @@ pub struct SyncResult {
 
 impl<F, C, E, S> SyncEngine<F, C, E, S>
 where
-   F: FileSystem,
+   F: FileSystem + Sync,
    C: Chunker,
    E: Embedder + Send + Sync,
    S: Store + Send + Sync,
@@ -54,7 +54,6 @@ where
 
       let files: Vec<_> = self.file_system.get_files(root)?.collect::<Vec<_>>();
 
-      let total_files = files.len();
       let mut processed = 0;
       let mut indexed = 0;
       let mut skipped = 0;
@@ -117,93 +116,107 @@ where
          self.store.delete_files(store_id, &changed_files).await?;
       }
 
+      let files_to_index: Vec<_> = hash_results
+         .into_iter()
+         .flatten()
+         .filter_map(|(path_str, hash, content, needs_indexing)| {
+            processed += 1;
+            if !needs_indexing {
+               skipped += 1;
+               None
+            } else if dry_run {
+               indexed += 1;
+               None
+            } else {
+               Some((path_str, hash, content))
+            }
+         })
+         .collect();
+
+      let chunked_files: Vec<_> = files_to_index
+         .par_iter()
+         .filter_map(|(path_str, hash, content)| {
+            let file_path = Path::new(path_str);
+            let content_str = String::from_utf8_lossy(content);
+
+            let chunks = self.chunker.chunk(&content_str, file_path).ok()?;
+            let anchor_chunk = create_anchor_chunk(&content_str, file_path);
+
+            let mut prepared_chunks = Vec::new();
+
+            let anchor_prepared = PreparedChunk {
+               id:           format!("{}:anchor", path_str),
+               path:         path_str.clone(),
+               hash:         hash.clone(),
+               content:      anchor_chunk.content,
+               start_line:   anchor_chunk.start_line as u32,
+               end_line:     anchor_chunk.end_line as u32,
+               chunk_index:  Some(0),
+               is_anchor:    Some(true),
+               chunk_type:   anchor_chunk.chunk_type,
+               context_prev: None,
+               context_next: None,
+            };
+            prepared_chunks.push(anchor_prepared);
+
+            for (idx, chunk) in chunks.iter().enumerate() {
+               let context_prev = if idx > 0 {
+                  Some(chunks[idx - 1].content.clone())
+               } else {
+                  None
+               };
+
+               let context_next = if idx < chunks.len() - 1 {
+                  Some(chunks[idx + 1].content.clone())
+               } else {
+                  None
+               };
+
+               let prepared = PreparedChunk {
+                  id:           format!("{}:{}", path_str, idx),
+                  path:         path_str.clone(),
+                  hash:         hash.clone(),
+                  content:      chunk.content.clone(),
+                  start_line:   chunk.start_line as u32,
+                  end_line:     chunk.end_line as u32,
+                  chunk_index:  Some(idx as u32 + 1),
+                  is_anchor:    Some(false),
+                  chunk_type:   chunk.chunk_type,
+                  context_prev,
+                  context_next,
+               };
+               prepared_chunks.push(prepared);
+            }
+
+            Some((path_str.clone(), hash.clone(), prepared_chunks))
+         })
+         .collect();
+
       let mut embed_queue: Vec<(String, String, Vec<PreparedChunk>)> = Vec::new();
       let mut since_save = 0;
+      let total_to_embed = chunked_files.len();
+      let mut embedded = 0;
 
-      for (path_str, hash, content, needs_indexing) in hash_results.into_iter().flatten() {
-         processed += 1;
-
-         if let Some(callback) = &progress_callback {
-            callback(SyncProgress {
-               processed,
-               indexed,
-               total: total_files,
-               current_file: Some(path_str.clone()),
-            });
-         }
-
-         if !needs_indexing {
-            skipped += 1;
-            continue;
-         }
-
-         if dry_run {
-            indexed += 1;
-            continue;
-         }
-
-         let file_path = Path::new(&path_str);
-         let content_str = String::from_utf8_lossy(&content).to_string();
-
-         let chunks = self.chunker.chunk(&content_str, file_path)?;
-
-         let anchor_chunk = create_anchor_chunk(&content_str, file_path);
-
-         let mut prepared_chunks = Vec::new();
-
-         let anchor_prepared = PreparedChunk {
-            id:           format!("{}:anchor", path_str),
-            path:         path_str.clone(),
-            hash:         hash.clone(),
-            content:      anchor_chunk.content,
-            start_line:   anchor_chunk.start_line as u32,
-            end_line:     anchor_chunk.end_line as u32,
-            chunk_index:  Some(0),
-            is_anchor:    Some(true),
-            chunk_type:   anchor_chunk.chunk_type,
-            context_prev: None,
-            context_next: None,
-         };
-         prepared_chunks.push(anchor_prepared);
-
-         for (idx, chunk) in chunks.iter().enumerate() {
-            let context_prev = if idx > 0 {
-               Some(chunks[idx - 1].content.clone())
-            } else {
-               None
-            };
-
-            let context_next = if idx < chunks.len() - 1 {
-               Some(chunks[idx + 1].content.clone())
-            } else {
-               None
-            };
-
-            let prepared = PreparedChunk {
-               id: format!("{}:{}", path_str, idx),
-               path: path_str.clone(),
-               hash: hash.clone(),
-               content: chunk.content.clone(),
-               start_line: chunk.start_line as u32,
-               end_line: chunk.end_line as u32,
-               chunk_index: Some(idx as u32 + 1),
-               is_anchor: Some(false),
-               chunk_type: chunk.chunk_type,
-               context_prev,
-               context_next,
-            };
-            prepared_chunks.push(prepared);
-         }
-
-         embed_queue.push((path_str.clone(), hash.clone(), prepared_chunks));
+      for (path_str, hash, prepared_chunks) in chunked_files {
+         embed_queue.push((path_str.clone(), hash, prepared_chunks));
 
          if embed_queue.len() >= batch_size {
+            if let Some(callback) = &progress_callback {
+               callback(SyncProgress {
+                  processed: embedded,
+                  indexed,
+                  total: total_to_embed,
+                  current_file: Some(format!("Embedding batch ({} files)...", embed_queue.len())),
+               });
+            }
+
             let batch = std::mem::take(&mut embed_queue);
             let batch_count = batch.len();
             let batch_indexed = self
                .process_embed_batch(store_id, batch, &mut meta_store)
                .await?;
             indexed += batch_indexed;
+            embedded += batch_count;
             since_save += batch_count;
 
             if since_save >= SAVE_INTERVAL {
@@ -213,9 +226,9 @@ where
 
             if let Some(callback) = &progress_callback {
                callback(SyncProgress {
-                  processed,
+                  processed: embedded,
                   indexed,
-                  total: total_files,
+                  total: total_to_embed,
                   current_file: None,
                });
             }
@@ -223,14 +236,34 @@ where
       }
 
       if !dry_run && !embed_queue.is_empty() {
+         if let Some(callback) = &progress_callback {
+            callback(SyncProgress {
+               processed: embedded,
+               indexed,
+               total: total_to_embed,
+               current_file: Some(format!("Embedding final batch ({} files)...", embed_queue.len())),
+            });
+         }
+
          let batch = std::mem::take(&mut embed_queue);
+         let batch_count = batch.len();
          let batch_indexed = self
             .process_embed_batch(store_id, batch, &mut meta_store)
             .await?;
          indexed += batch_indexed;
+         embedded += batch_count;
       }
 
       if !dry_run {
+         if let Some(callback) = &progress_callback {
+            callback(SyncProgress {
+               processed: embedded,
+               indexed,
+               total: total_to_embed,
+               current_file: Some("Creating indexes...".to_string()),
+            });
+         }
+
          meta_store.save()?;
 
          if indexed > 0 {
@@ -240,7 +273,12 @@ where
       }
 
       if let Some(callback) = &progress_callback {
-         callback(SyncProgress { processed, indexed, total: total_files, current_file: None });
+         callback(SyncProgress {
+            processed: total_to_embed,
+            indexed,
+            total: total_to_embed,
+            current_file: None,
+         });
       }
 
       Ok(SyncResult { processed, indexed, skipped, deleted: deleted_count })

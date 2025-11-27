@@ -1,0 +1,3 @@
+[env]
+NVCC_PREPEND_FLAGS = "--diag-suppress=20012"
+CUDA_ROOT = "/usr/local/cuda-13.0"

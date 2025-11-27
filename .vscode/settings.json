@@ -1,0 +1,7 @@
+{
+   "files.associations": {
+      "*.sql": "sql",
+      "*.proto": "proto3",
+      "cmath": "cpp"
+   }
+}

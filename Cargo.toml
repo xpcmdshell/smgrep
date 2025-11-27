@@ -10,6 +10,10 @@ repository = "https://github.com/kris-hansen/osgrep"
 name = "rsgrep"
 path = "src/main.rs"
 
+[features]
+default = ["cuda"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -18,9 +22,9 @@ clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 
 # ML inference
-candle-core = { version = "0.9", features = ["cuda"] }
-candle-nn = { version = "0.9", features = ["cuda"] }
-candle-transformers = { version = "0.9", features = ["cuda"] }
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
 tokenizers = "0.22"
 hf-hub = "0.4"
 
@@ -56,7 +60,6 @@ tree-sitter-java = "0.23.5"
 tree-sitter-ruby = "0.23.1"
 tree-sitter-php = "0.24.2"
 tree-sitter-swift = "0.7.1"
-# tree-sitter-kotlin = "0.3.8"  # incompatible tree-sitter version
 tree-sitter-html = "0.23.2"
 tree-sitter-css = "0.25.0"
 tree-sitter-bash = "0.25.0"
@@ -132,24 +135,6 @@ incremental = true
 codegen-units = 256
 strip = "none"
 debug = "line-tables-only"
-split-debuginfo = "packed"
 
 [profile.test]
 inherits = "dev"
-
-#[patch.crates-io]
-#arrow-array = "56.2.0"
-#arrow-schema = "56.2.0"
-#arrow-arith = "56.2.0"
-#arrow-buffer = "56.2.0"
-#arrow-cast = "56.2.0"
-#arrow-csv = "56.2.0"
-#arrow-data = "56.2.0"
-#arrow-ipc = "56.2.0"
-#arrow-json = "56.2.0"
-#arrow-ord = "56.2.0"
-#arrow-pyarrow = "56.2.0"
-#arrow-row = "56.2.0"
-#arrow-select = "56.2.0"
-#arrow-string = "56.2.0"
-# Code parsing

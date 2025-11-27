@@ -1,0 +1,20 @@
+{
+  "name": "rsgrep",
+  "version": "0.1.0",
+  "description": "Semantic code search for Claude Code. Automatically indexes your project and provides intelligent search capabilities.",
+  "author": {
+    "name": "Can Bölük",
+    "email": "me@can.ac"
+  },
+  "hooks": "./hooks.json",
+  "homepage": "https://github.com/can1357/rsgrep",
+  "repository": "https://github.com/can1357/rsgrep",
+  "license": "Apache-2.0",
+  "keywords": [
+    "search",
+    "semantic",
+    "grep",
+    "code-search",
+    "semantic-search"
+  ]
+}

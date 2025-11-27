@@ -686,20 +686,21 @@ impl super::Store for LanceStore {
          },
       };
 
+      let anchor_filter = "(is_anchor IS NULL OR is_anchor = false)";
       let doc_clause =
          "(path LIKE '%.md' OR path LIKE '%.mdx' OR path LIKE '%.txt' OR path LIKE '%.json')";
       let code_clause = format!("NOT {}", doc_clause);
 
-      let mut code_filter = code_clause.clone();
-      let mut doc_filter = doc_clause.to_string();
-      let mut base_filter: Option<String> = None;
+      let mut code_filter = format!("{} AND {}", code_clause, anchor_filter);
+      let mut doc_filter = format!("{} AND {}", doc_clause, anchor_filter);
+      let mut base_filter = Some(anchor_filter.to_string());
 
       if let Some(filter) = path_filter {
          let escaped = filter.replace('\'', "''").replace('\\', "\\\\");
          let path_clause = format!("path LIKE '{}%'", escaped);
-         code_filter = format!("{} AND {}", path_clause, code_clause);
-         doc_filter = format!("{} AND {}", path_clause, doc_clause);
-         base_filter = Some(path_clause);
+         code_filter = format!("{} AND {} AND {}", path_clause, code_clause, anchor_filter);
+         doc_filter = format!("{} AND {} AND {}", path_clause, doc_clause, anchor_filter);
+         base_filter = Some(format!("{} AND {}", path_clause, anchor_filter));
       }
 
       let code_results_stream = table

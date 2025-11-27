@@ -1,22 +1,27 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::OnceLock};
 
 use directories::BaseDirs;
 
-pub const DENSE_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
-pub const COLBERT_MODEL: &str = "colbert-ir/colbertv2.0";
+pub const DENSE_MODEL: &str = "ibm-granite/granite-embedding-30m-english";
+pub const COLBERT_MODEL: &str = "answerdotai/answerai-colbert-small-v1";
 
 pub const DENSE_DIM: usize = 384;
-pub const COLBERT_DIM: usize = 128;
+pub const COLBERT_DIM: usize = 96;
 
 pub const QUERY_PREFIX: &str = "";
+
+pub const DENSE_MAX_LENGTH: usize = 256;
+pub const COLBERT_MAX_LENGTH: usize = 256;
 
 pub const DEFAULT_BATCH_SIZE: usize = 48;
 pub const MAX_BATCH_SIZE: usize = 96;
 
-pub const MAX_THREADS: usize = 4;
+pub const MAX_THREADS: usize = 32;
+
+static DEFAULT_THREADS: OnceLock<usize> = OnceLock::new();
 
 pub fn default_threads() -> usize {
-   (num_cpus::get() - 1).max(1).min(MAX_THREADS)
+   *DEFAULT_THREADS.get_or_init(|| (num_cpus::get().saturating_sub(4)).clamp(1, MAX_THREADS))
 }
 
 pub fn data_dir() -> PathBuf {
@@ -57,6 +62,13 @@ pub fn low_impact() -> bool {
    std::env::var("RSGREP_LOW_IMPACT")
       .ok()
       .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+      .unwrap_or(false)
+}
+
+pub fn disable_gpu() -> bool {
+   std::env::var("RSGREP_DISABLE_GPU")
+      .ok()
+      .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
       .unwrap_or(false)
 }
 

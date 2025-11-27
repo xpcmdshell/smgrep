@@ -116,3 +116,24 @@ pub fn detect_language(path: &Path) -> Option<&'static str> {
          _ => None,
       })
 }
+
+pub fn format_chunk_text(context: &[String], file_path: &str, content: &str) -> String {
+   let mut breadcrumb = context.to_vec();
+   let file_label = format!("File: {}", if file_path.is_empty() { "unknown" } else { file_path });
+
+   let has_file_label = breadcrumb
+      .iter()
+      .any(|entry| entry.starts_with("File: "));
+
+   if !has_file_label {
+      breadcrumb.insert(0, file_label.clone());
+   }
+
+   let header = if breadcrumb.is_empty() {
+      file_label
+   } else {
+      breadcrumb.join(" > ")
+   };
+
+   format!("{}\n---\n{}", header, content)
+}

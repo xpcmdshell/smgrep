@@ -3,8 +3,7 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result};
 use console::style;
 
-const EMBED_MODEL_ID: &str = "onnx-community/granite-embedding-30m-english-ONNX";
-const COLBERT_MODEL_ID: &str = "ryandono/osgrep-colbert-q8";
+use crate::config::{COLBERT_MODEL, DENSE_MODEL};
 
 pub async fn execute() -> Result<()> {
    println!("{}\n", style("🏥 rsgrep Doctor").bold());
@@ -26,10 +25,9 @@ pub async fn execute() -> Result<()> {
 
    println!();
 
-   let model_ids = vec![EMBED_MODEL_ID, COLBERT_MODEL_ID];
    let mut all_good = true;
 
-   for model_id in &model_ids {
+   for model_id in &[DENSE_MODEL, COLBERT_MODEL] {
       let model_path = models.join(model_id.replace('/', "--"));
       let exists = model_path.exists();
 

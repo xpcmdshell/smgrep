@@ -18,6 +18,8 @@ struct SearchResult {
    start_line: Option<usize>,
    #[serde(skip_serializing_if = "Option::is_none")]
    end_line:   Option<usize>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   is_anchor:  Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,13 +52,9 @@ pub async fn execute(
       return Ok(());
    }
 
-   let resolved_store_id = store_id.unwrap_or_else(|| {
-      root
-         .file_name()
-         .and_then(|s| s.to_str())
-         .unwrap_or("default")
-         .to_string()
-   });
+   let resolved_store_id = store_id
+      .map(Ok)
+      .unwrap_or_else(|| crate::git::resolve_store_id(&search_path))?;
 
    if dry_run {
       if json {
@@ -84,7 +82,7 @@ pub async fn execute(
       spinner.finish_with_message("Sync complete");
    }
 
-   let results = perform_search(&query, &search_path, max, per_file, !no_rerank).await?;
+   let results = perform_search(&query, &search_path, &resolved_store_id, max, per_file, !no_rerank).await?;
 
    if results.is_empty() {
       if !json {
@@ -159,11 +157,11 @@ async fn try_server_fastpath(
 async fn perform_search(
    query: &str,
    path: &PathBuf,
+   store_id: &str,
    max: usize,
    per_file: usize,
    rerank: bool,
 ) -> Result<Vec<SearchResult>> {
-   let store_id = crate::git::resolve_store_id(path)?;
 
    let store = std::sync::Arc::new(crate::store::LanceStore::new()?);
    let embedder = std::sync::Arc::new(crate::embed::worker::EmbedWorker::new()?);
@@ -204,6 +202,7 @@ async fn perform_search(
             chunk_type: Some(format!("{:?}", r.chunk_type).to_lowercase()),
             start_line: Some(r.start_line as usize),
             end_line:   Some((r.start_line + r.num_lines) as usize),
+            is_anchor:  r.is_anchor,
          }
       })
       .collect();
@@ -220,6 +219,8 @@ fn format_results(
    scores: bool,
    plain: bool,
 ) -> Result<()> {
+   const MAX_PREVIEW_LINES: usize = 12;
+
    if compact {
       for result in results {
          println!("{}", result.path);
@@ -235,49 +236,72 @@ fn format_results(
       println!("Root: {}\n", root.display());
    }
 
-   for (i, result) in results.iter().enumerate() {
+   let display_results: Vec<_> = results
+      .iter()
+      .filter(|r| !r.is_anchor.unwrap_or(false))
+      .collect();
+
+   for (i, result) in display_results.iter().enumerate() {
+      let start_line = result.start_line.unwrap_or(1);
+      let lines: Vec<&str> = result.content.lines().collect();
+      let total_lines = lines.len();
+      let show_all = content || total_lines <= MAX_PREVIEW_LINES;
+      let display_lines = if show_all { total_lines } else { MAX_PREVIEW_LINES };
+      let line_num_width = format!("{}", start_line + display_lines).len();
+
       if !plain {
-         print!("{} ", style(format!("{}.", i + 1)).bold().cyan());
-         print!("{}", style(&result.path).green());
+         print!("{}", style(format!("{}) ", i + 1)).bold().cyan());
+         print!("📂 {}", style(format!("{}:{}", &result.path, start_line)).green());
 
          if scores {
             print!(" {}", style(format!("(score: {:.3})", result.score)).dim());
          }
 
-         if let Some(ref chunk_type) = result.chunk_type {
-            print!(" {}", style(format!("[{}]", chunk_type)).yellow());
-         }
-
          println!();
 
-         if content || result.content.lines().count() <= 5 {
-            for line in result.content.lines() {
-               println!("  {}", line);
-            }
-         } else {
-            let snippet: Vec<&str> = result.content.lines().take(3).collect();
-            for line in snippet {
-               println!("  {}", line);
-            }
-            println!("  {}", style("...").dim());
+         for (j, line) in lines.iter().take(display_lines).enumerate() {
+            let line_num = start_line + j;
+            println!(
+               "{:>width$} {} {}",
+               style(line_num).dim(),
+               style("│").dim(),
+               line,
+               width = line_num_width
+            );
+         }
+
+         if !show_all {
+            let remaining = total_lines - display_lines;
+            println!(
+               "{:>width$} {} {}",
+               "",
+               style("│").dim(),
+               style(format!("... (+{} more lines)", remaining)).dim(),
+               width = line_num_width
+            );
          }
       } else {
-         print!("{}. {}", i + 1, result.path);
+         print!("{}) 📂 {}:{}", i + 1, result.path, start_line);
 
          if scores {
             print!(" (score: {:.3})", result.score);
          }
 
-         if let Some(ref chunk_type) = result.chunk_type {
-            print!(" [{}]", chunk_type);
-         }
-
          println!();
 
-         if content {
-            for line in result.content.lines() {
-               println!("  {}", line);
-            }
+         for (j, line) in lines.iter().take(display_lines).enumerate() {
+            let line_num = start_line + j;
+            println!("{:>width$} │ {}", line_num, line, width = line_num_width);
+         }
+
+         if !show_all {
+            let remaining = total_lines - display_lines;
+            println!(
+               "{:>width$} │ ... (+{} more lines)",
+               "",
+               remaining,
+               width = line_num_width
+            );
          }
       }
 
