@@ -1,8 +1,10 @@
 use std::{
-   io::{BufRead, Write},
+   io::Write,
    path::{Path, PathBuf},
    process::{Command, Stdio},
 };
+
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -106,21 +108,13 @@ impl DaemonConn {
 }
 
 pub async fn execute() -> Result<()> {
+   let stdin = BufReader::new(tokio::io::stdin());
+   let mut lines = stdin.lines();
+
    let cwd = std::env::current_dir()?;
    let mut conn: Option<DaemonConn> = None;
 
-   let stdin = std::io::stdin();
-
-   loop {
-      let line = {
-         let mut lines = stdin.lock().lines();
-         match lines.next() {
-            Some(Ok(l)) => l,
-            Some(Err(e)) => return Err(e.into()),
-            None => break,
-         }
-      };
-
+   while let Some(line) = lines.next_line().await? {
       if line.is_empty() {
          continue;
       }
@@ -129,25 +123,30 @@ pub async fn execute() -> Result<()> {
          Ok(r) => r,
          Err(e) => {
             let response = JsonRpcResponse::error(Value::Null, -32700, format!("Parse error: {e}"));
-            let mut stdout = std::io::stdout().lock();
-            serde_json::to_writer(&mut stdout, &response)?;
-            stdout.flush()?;
+            write_response(&response)?;
             continue;
          },
       };
 
       let id = request.id.clone().unwrap_or(Value::Null);
-      let response = handle_request(request, cwd.as_path(), &mut conn).await;
+      let response = handle_request(request, &cwd, &mut conn).await;
       let response = match response {
          Ok(result) => JsonRpcResponse::success(id, result),
          Err(e) => JsonRpcResponse::error(id, -32603, e.to_string()),
       };
 
-      let mut stdout = std::io::stdout().lock();
-      serde_json::to_writer(&mut stdout, &response)?;
-      stdout.flush()?;
+      write_response(&response)?;
    }
 
+   Ok(())
+}
+
+fn write_response(response: &JsonRpcResponse) -> Result<()> {
+   let stdout = std::io::stdout();
+   let mut stdout = stdout.lock();
+   serde_json::to_writer(&mut stdout, response)?;
+   stdout.write_all(b"\n")?;
+   stdout.flush()?;
    Ok(())
 }
 

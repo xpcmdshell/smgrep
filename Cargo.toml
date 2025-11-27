@@ -1,6 +1,6 @@
 [package]
 name = "smgrep"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 description = "Semantic code search tool with GPU acceleration - Rust port of osgrep"
 license = "Apache-2.0"
