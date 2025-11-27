@@ -4,7 +4,9 @@
   </a>
   <h1>smgrep</h1>
   <p><em>Semantic code search, GPU-accelerated.</em></p>
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a>
+  <a href="https://crates.io/crates/smgrep"><img src="https://img.shields.io/crates/v/smgrep.svg" alt="Crates.io" /></a>
+  <a href="https://crates.io/crates/smgrep"><img src="https://img.shields.io/crates/d/smgrep.svg" alt="Downloads" /></a>
+  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License" /></a>
 </div>
 
 Natural-language search that works like `grep`. Fast, local, GPU-accelerated, and built for coding agents.
@@ -163,11 +165,16 @@ smgrep doctor
 smgrep uses [candle](https://github.com/huggingface/candle) for ML inference with optional CUDA support.
 
 **With CUDA (default):**
+
+Requires CUDA toolkit installed with environment configured:
 ```bash
+export CUDA_ROOT=/usr/local/cuda  # or your CUDA installation path
+export PATH="$CUDA_ROOT/bin:$PATH"
+
 cargo build --release
 ```
 
-Requires CUDA toolkit installed. Embedding speed is significantly faster on NVIDIA GPUs.
+Embedding speed is significantly faster on NVIDIA GPUs.
 
 **CPU-only:**
 ```bash
