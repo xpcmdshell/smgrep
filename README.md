@@ -258,9 +258,6 @@ fast_mode = false
 # Server
 # ============================================================================
 
-# Default port for the daemon server
-port = 4444
-
 # Idle timeout: shutdown daemon after this many seconds of inactivity
 idle_timeout_secs = 1800  # 30 minutes
 
@@ -295,7 +292,6 @@ Any config option can be set via environment variable with the `SMGREP_` prefix:
 # Examples
 export SMGREP_DISABLE_GPU=true
 export SMGREP_DEFAULT_BATCH_SIZE=24
-export SMGREP_PORT=5555
 export SMGREP_IDLE_TIMEOUT_SECS=3600
 ```
 
@@ -304,7 +300,6 @@ export SMGREP_IDLE_TIMEOUT_SECS=3600
 | `SMGREP_STORE` | Override store name | auto-detected |
 | `SMGREP_DISABLE_GPU` | Force CPU inference | `false` |
 | `SMGREP_DEFAULT_BATCH_SIZE` | Embedding batch size | `48` |
-| `SMGREP_PORT` | Daemon server port | `4444` |
 | `SMGREP_LOW_IMPACT` | Reduce resource usage | `false` |
 | `SMGREP_FAST_MODE` | Skip reranking | `false` |
 
