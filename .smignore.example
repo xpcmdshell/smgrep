@@ -1,5 +1,5 @@
-# Example .smgrepignore file
-# Copy this to .smgrepignore in your repository root to exclude files from indexing.
+# Example .smignore file
+# Copy this to .smignore in your repository root to exclude files from indexing.
 # Uses the same syntax as .gitignore
 
 # Build outputs

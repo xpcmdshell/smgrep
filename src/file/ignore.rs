@@ -50,14 +50,9 @@ impl IgnorePatterns {
          let _ = builder.add(&gitignore);
       }
 
-      let smgrep_ignore = root.join(".smgrep").join("ignore");
+      let smgrep_ignore = root.join(".smignore");
       if smgrep_ignore.exists() {
          let _ = builder.add(&smgrep_ignore);
-      }
-
-      let osgrep_ignore = root.join(".osgrepignore");
-      if osgrep_ignore.exists() {
-         let _ = builder.add(&osgrep_ignore);
       }
 
       Self { gitignore: builder.build().ok() }
@@ -119,10 +114,8 @@ mod tests {
    #[test]
    fn negation_patterns_work() {
       let tmp = TempDir::new().unwrap();
-      let smgrep_dir = tmp.path().join(".smgrep");
-      fs::create_dir(&smgrep_dir).unwrap();
 
-      let ignore_file = smgrep_dir.join("ignore");
+      let ignore_file = tmp.path().join(".smignore");
       fs::write(&ignore_file, "*.log\n!important.log\n").unwrap();
 
       let ignore = IgnorePatterns::new(tmp.path());
@@ -139,10 +132,8 @@ mod tests {
    #[test]
    fn comment_patterns_ignored() {
       let tmp = TempDir::new().unwrap();
-      let smgrep_dir = tmp.path().join(".smgrep");
-      fs::create_dir(&smgrep_dir).unwrap();
 
-      let ignore_file = smgrep_dir.join("ignore");
+      let ignore_file = tmp.path().join(".smignore");
       fs::write(&ignore_file, "# This is a comment\n*.tmp\n# Another comment\n").unwrap();
 
       let ignore = IgnorePatterns::new(tmp.path());
@@ -156,10 +147,8 @@ mod tests {
    #[test]
    fn anchored_patterns_work() {
       let tmp = TempDir::new().unwrap();
-      let smgrep_dir = tmp.path().join(".smgrep");
-      fs::create_dir(&smgrep_dir).unwrap();
 
-      let ignore_file = smgrep_dir.join("ignore");
+      let ignore_file = tmp.path().join(".smignore");
       fs::write(&ignore_file, "/root.config\n").unwrap();
 
       let ignore = IgnorePatterns::new(tmp.path());
@@ -177,10 +166,8 @@ mod tests {
    #[test]
    fn double_star_patterns_work() {
       let tmp = TempDir::new().unwrap();
-      let smgrep_dir = tmp.path().join(".smgrep");
-      fs::create_dir(&smgrep_dir).unwrap();
 
-      let ignore_file = smgrep_dir.join("ignore");
+      let ignore_file = tmp.path().join(".smignore");
       fs::write(&ignore_file, "**/generated/**\n").unwrap();
 
       let ignore = IgnorePatterns::new(tmp.path());

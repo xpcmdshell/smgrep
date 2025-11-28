@@ -21,11 +21,13 @@ Natural-language search that works like `grep`. Fast, local, GPU-accelerated, an
 ## Quick Start
 
 1. **Install**
+
    ```bash
    cargo install smgrep
    ```
 
    Or build from source:
+
    ```bash
    git clone https://github.com/can1357/smgrep
    cd smgrep
@@ -33,6 +35,7 @@ Natural-language search that works like `grep`. Fast, local, GPU-accelerated, an
    ```
 
    For CPU-only builds (no CUDA):
+
    ```bash
    cargo build --release --no-default-features
    ```
@@ -167,6 +170,7 @@ smgrep uses [candle](https://github.com/huggingface/candle) for ML inference wit
 **With CUDA (default):**
 
 Requires CUDA toolkit installed with environment configured:
+
 ```bash
 export CUDA_ROOT=/usr/local/cuda  # or your CUDA installation path
 export PATH="$CUDA_ROOT/bin:$PATH"
@@ -177,11 +181,13 @@ cargo build --release
 Embedding speed is significantly faster on NVIDIA GPUs.
 
 **CPU-only:**
+
 ```bash
 cargo build --release --no-default-features
 ```
 
 **Environment variables:**
+
 - `SMGREP_DISABLE_GPU=1` - Force CPU even when CUDA is available
 - `SMGREP_BATCH_SIZE=N` - Override batch size (auto-adapts on OOM)
 
@@ -295,19 +301,20 @@ export SMGREP_DEFAULT_BATCH_SIZE=24
 export SMGREP_IDLE_TIMEOUT_SECS=3600
 ```
 
-| Variable | Description | Default |
-| --- | --- | --- |
-| `SMGREP_STORE` | Override store name | auto-detected |
-| `SMGREP_DISABLE_GPU` | Force CPU inference | `false` |
-| `SMGREP_DEFAULT_BATCH_SIZE` | Embedding batch size | `48` |
-| `SMGREP_LOW_IMPACT` | Reduce resource usage | `false` |
-| `SMGREP_FAST_MODE` | Skip reranking | `false` |
+| Variable                    | Description           | Default       |
+| --------------------------- | --------------------- | ------------- |
+| `SMGREP_STORE`              | Override store name   | auto-detected |
+| `SMGREP_DISABLE_GPU`        | Force CPU inference   | `false`       |
+| `SMGREP_DEFAULT_BATCH_SIZE` | Embedding batch size  | `48`          |
+| `SMGREP_LOW_IMPACT`         | Reduce resource usage | `false`       |
+| `SMGREP_FAST_MODE`          | Skip reranking        | `false`       |
 
 ### Ignoring Files
 
-smgrep respects `.gitignore` and `.smgrepignore` files.
+smgrep respects `.gitignore` and `.smignore` files.
 
-Create `.smgrepignore` in your repository root:
+Create `.smignore` in your repository root:
+
 ```
 # Ignore generated files
 dist/
