@@ -1,5 +1,8 @@
+//! LanceDB-backed vector storage with Arrow integration and automatic schema
+//! migration.
+
 use std::{
-   collections::{HashMap, HashSet},
+   collections::{HashMap, HashSet, hash_map::Entry},
    fs,
    path::{Path, PathBuf},
    sync::Arc,
@@ -26,10 +29,12 @@ use crate::{
    Str, config,
    error::Result,
    meta::FileHash,
+   search::colbert::max_sim_quantized,
    store,
    types::{ChunkType, SearchResponse, SearchResult, SearchStatus, StoreInfo, VectorRecord},
 };
 
+/// Errors that can occur during `LanceDB` operations.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
    #[error("invalid database path")]
@@ -141,6 +146,7 @@ pub enum StoreError {
    CreateVectorIndex(#[source] lancedb::Error),
 }
 
+/// Single-use [`RecordBatch`] iterator for `LanceDB` table creation.
 pub enum RecordBatchOnce {
    Batch(RecordBatch),
    Taken(SchemaRef),
@@ -152,6 +158,7 @@ impl RecordBatchOnce {
       Self::Batch(batch)
    }
 
+   /// Extracts the batch if available, returning its schema if already taken.
    pub fn take(&mut self) -> Result<RecordBatch, SchemaRef> {
       let prev = std::mem::replace(self, Self::__Invalid);
       match prev {
@@ -188,12 +195,15 @@ impl RecordBatchReader for RecordBatchOnce {
    }
 }
 
+/// `LanceDB` implementation of [`Store`](super::Store) with connection pooling
+/// and automatic migration.
 pub struct LanceStore {
    connections: RwLock<HashMap<String, Arc<Connection>>>,
    data_dir:    PathBuf,
 }
 
 impl LanceStore {
+   /// Creates a new store using the data directory from configuration.
    pub fn new() -> Result<Self> {
       let data_dir = config::data_dir();
       fs::create_dir_all(data_dir)?;
@@ -210,7 +220,7 @@ impl LanceStore {
       }
 
       let db_path = self.data_dir.join(store_id);
-      fs::create_dir_all(&db_path)?;
+      tokio::fs::create_dir_all(&db_path).await?;
 
       let conn = connect(db_path.to_str().ok_or(StoreError::InvalidDatabasePath)?)
          .execute()
@@ -218,12 +228,15 @@ impl LanceStore {
          .map_err(StoreError::Connect)?;
 
       let conn = Arc::new(conn);
-      self
-         .connections
-         .write()
-         .insert(store_id.to_string(), Arc::clone(&conn));
 
-      Ok(conn)
+      let mut connections = self.connections.write();
+      match connections.entry(store_id.to_string()) {
+         Entry::Occupied(e) => Ok(Arc::clone(e.get())),
+         Entry::Vacant(e) => {
+            e.insert(Arc::clone(&conn));
+            Ok(conn)
+         },
+      }
    }
 
    async fn get_table(&self, store_id: &str) -> Result<Table> {
@@ -289,7 +302,7 @@ impl LanceStore {
          .await
          .map_err(StoreError::ReadExistingDataForMigration)?;
 
-      let mut existing_batches: Vec<RecordBatch> = Vec::new();
+      let mut existing_batches: Vec<RecordBatch> = Vec::with_capacity(16);
       while let Some(batch) = all_stream
          .try_next()
          .await
@@ -313,63 +326,85 @@ impl LanceStore {
          .map_err(StoreError::CreateNewTableDuringMigration)?;
 
       if !existing_batches.is_empty() {
-         let mut migrated_records = Vec::new();
+         let total_rows: usize = existing_batches.iter().map(|b| b.num_rows()).sum();
+         let mut migrated_records = Vec::with_capacity(total_rows);
 
          for batch in existing_batches {
+            let id_col = batch
+               .column_by_name("id")
+               .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+            let path_col = batch
+               .column_by_name("path")
+               .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+            let hash_col = batch
+               .column_by_name("hash")
+               .and_then(|col| col.as_any().downcast_ref::<BinaryArray>());
+            let content_col = batch.column_by_name("content");
+            let content_large_col =
+               content_col.and_then(|col| col.as_any().downcast_ref::<LargeStringArray>());
+            let content_str_col =
+               content_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
+            let start_line_col = batch
+               .column_by_name("start_line")
+               .and_then(|col| col.as_any().downcast_ref::<UInt32Array>());
+            let end_line_col = batch
+               .column_by_name("end_line")
+               .and_then(|col| col.as_any().downcast_ref::<UInt32Array>());
+            let vector_col = batch.column_by_name("vector");
+            let vector_list =
+               vector_col.and_then(|col| col.as_any().downcast_ref::<FixedSizeListArray>());
+            let colbert_col = batch
+               .column_by_name("colbert")
+               .and_then(|col| col.as_any().downcast_ref::<LargeBinaryArray>());
+            let colbert_scale_col = batch
+               .column_by_name("colbert_scale")
+               .and_then(|col| col.as_any().downcast_ref::<Float64Array>());
+            let chunk_index_col = batch
+               .column_by_name("chunk_index")
+               .and_then(|col| col.as_any().downcast_ref::<UInt32Array>());
+            let is_anchor_col = batch
+               .column_by_name("is_anchor")
+               .and_then(|col| col.as_any().downcast_ref::<BooleanArray>());
+            let chunk_type_col = batch
+               .column_by_name("chunk_type")
+               .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+            let context_prev_col = batch
+               .column_by_name("context_prev")
+               .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+            let context_next_col = batch
+               .column_by_name("context_next")
+               .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+
             for row_idx in 0..batch.num_rows() {
-               let id = batch
-                  .column_by_name("id")
-                  .and_then(|col| col.as_any().downcast_ref::<StringArray>())
+               let id = id_col
                   .map(|arr| arr.value(row_idx).to_string())
                   .unwrap_or_default();
 
-               let path: PathBuf = batch
-                  .column_by_name("path")
-                  .and_then(|col| col.as_any().downcast_ref::<StringArray>())
+               let path: PathBuf = path_col
                   .map(|arr| arr.value(row_idx).into())
                   .unwrap_or_default();
 
-               let hash = batch
-                  .column_by_name("hash")
-                  .and_then(|col| col.as_any().downcast_ref::<BinaryArray>())
+               let hash = hash_col
                   .and_then(|arr| FileHash::from_slice(arr.value(row_idx)))
                   .unwrap_or_default();
 
-               let content: Str = batch
-                  .column_by_name("content")
-                  .and_then(|col| {
-                     col.as_any()
-                        .downcast_ref::<LargeStringArray>()
-                        .map(|arr| arr.value(row_idx).to_string())
-                        .or_else(|| {
-                           col.as_any()
-                              .downcast_ref::<StringArray>()
-                              .map(|arr| arr.value(row_idx).to_string())
-                        })
-                  })
+               let content: Str = content_large_col
+                  .map(|arr| arr.value(row_idx).to_string())
+                  .or_else(|| content_str_col.map(|arr| arr.value(row_idx).to_string()))
                   .unwrap_or_default()
                   .into();
 
-               let start_line = batch
-                  .column_by_name("start_line")
-                  .and_then(|col| col.as_any().downcast_ref::<UInt32Array>())
-                  .map_or(0, |arr| arr.value(row_idx));
+               let start_line = start_line_col.map_or(0, |arr| arr.value(row_idx));
 
-               let end_line = batch
-                  .column_by_name("end_line")
-                  .and_then(|col| col.as_any().downcast_ref::<UInt32Array>())
-                  .map_or(start_line, |arr| arr.value(row_idx));
+               let end_line = end_line_col.map_or(start_line, |arr| arr.value(row_idx));
 
-               let old_vector_col = batch.column_by_name("vector").unwrap();
-               let old_vector_list = old_vector_col
-                  .as_any()
-                  .downcast_ref::<FixedSizeListArray>()
-                  .unwrap();
-               let old_vector_values = old_vector_list.value(row_idx);
+               let old_vector_values = vector_list
+                  .expect("vector column must exist during migration")
+                  .value(row_idx);
                let old_vector_floats = old_vector_values
                   .as_any()
                   .downcast_ref::<Float32Array>()
-                  .unwrap();
+                  .expect("vector values must be Float32Array");
 
                let old_vec: Vec<f32> = (0..old_vector_floats.len())
                   .map(|i| old_vector_floats.value(i))
@@ -377,87 +412,65 @@ impl LanceStore {
 
                let new_vector = Self::normalize_vector(&old_vec);
 
-               let colbert = batch
-                  .column_by_name("colbert")
-                  .and_then(|col| {
-                     if col.is_null(row_idx) {
-                        None
-                     } else {
-                        col.as_any()
-                           .downcast_ref::<LargeBinaryArray>()
-                           .map(|arr| arr.value(row_idx).to_vec())
-                     }
-                  })
-                  .unwrap_or_default();
+               let colbert = if let Some(col) = colbert_col
+                  && !col.is_null(row_idx)
+               {
+                  col.value(row_idx).to_vec()
+               } else {
+                  Vec::new()
+               };
 
-               let colbert_scale = batch
-                  .column_by_name("colbert_scale")
-                  .and_then(|col| {
-                     if col.is_null(row_idx) {
-                        None
-                     } else {
-                        col.as_any()
-                           .downcast_ref::<Float64Array>()
-                           .map(|arr| arr.value(row_idx))
-                     }
-                  })
-                  .unwrap_or(1.0);
+               let colbert_scale = if let Some(col) = colbert_scale_col
+                  && !col.is_null(row_idx)
+               {
+                  col.value(row_idx)
+               } else {
+                  1.0
+               };
 
-               let chunk_index = batch.column_by_name("chunk_index").and_then(|col| {
-                  if col.is_null(row_idx) {
-                     None
-                  } else {
-                     col.as_any()
-                        .downcast_ref::<UInt32Array>()
-                        .map(|arr| arr.value(row_idx))
-                  }
-               });
+               let chunk_index = if let Some(col) = chunk_index_col
+                  && !col.is_null(row_idx)
+               {
+                  Some(col.value(row_idx))
+               } else {
+                  None
+               };
 
-               let is_anchor = batch.column_by_name("is_anchor").and_then(|col| {
-                  if col.is_null(row_idx) {
-                     None
-                  } else {
-                     col.as_any()
-                        .downcast_ref::<BooleanArray>()
-                        .map(|arr| arr.value(row_idx))
-                  }
-               });
+               let is_anchor = if let Some(col) = is_anchor_col
+                  && !col.is_null(row_idx)
+               {
+                  Some(col.value(row_idx))
+               } else {
+                  None
+               };
 
-               let chunk_type = batch.column_by_name("chunk_type").and_then(|col| {
-                  if col.is_null(row_idx) {
-                     None
-                  } else {
-                     col.as_any()
-                        .downcast_ref::<StringArray>()
-                        .map(|arr| Self::parse_chunk_type(arr.value(row_idx)))
-                  }
-               });
+               let chunk_type = if let Some(col) = chunk_type_col
+                  && !col.is_null(row_idx)
+               {
+                  Some(Self::parse_chunk_type(col.value(row_idx)))
+               } else {
+                  None
+               };
 
-               let context_prev: Option<Str> =
-                  batch.column_by_name("context_prev").and_then(|col| {
-                     if col.is_null(row_idx) {
-                        None
-                     } else {
-                        col.as_any()
-                           .downcast_ref::<StringArray>()
-                           .map(|arr| Str::copy_from_str(arr.value(row_idx)))
-                     }
-                  });
+               let context_prev: Option<Str> = if let Some(col) = context_prev_col
+                  && !col.is_null(row_idx)
+               {
+                  Some(Str::copy_from_str(col.value(row_idx)))
+               } else {
+                  None
+               };
 
-               let context_next: Option<Str> =
-                  batch.column_by_name("context_next").and_then(|col| {
-                     if col.is_null(row_idx) {
-                        None
-                     } else {
-                        col.as_any()
-                           .downcast_ref::<StringArray>()
-                           .map(|arr| Str::copy_from_str(arr.value(row_idx)))
-                     }
-                  });
+               let context_next: Option<Str> = if let Some(col) = context_next_col
+                  && !col.is_null(row_idx)
+               {
+                  Some(Str::copy_from_str(col.value(row_idx)))
+               } else {
+                  None
+               };
 
                migrated_records.push(VectorRecord {
                   id,
-                  path,
+                  path: std::sync::Arc::new(path),
                   hash,
                   content,
                   start_line,
@@ -569,6 +582,7 @@ impl LanceStore {
          return Err(StoreError::EmptyBatch.into());
       }
 
+      let cfg = config::get();
       let schema = Self::create_schema();
       let _len = records.len();
 
@@ -587,15 +601,15 @@ impl LanceStore {
       let mut context_prev_builder = StringBuilder::new();
       let mut context_next_builder = StringBuilder::new();
 
+      let dim = cfg.dense_dim;
       for record in records {
          id_builder.append_value(&record.id);
-         path_builder.append_value(store::path_to_store_key(&record.path));
+         path_builder.append_value(store::path_to_store_value(&record.path));
          hash_builder.append_value(record.hash);
          content_builder.append_value(&record.content);
          start_line_builder.append_value(record.start_line);
          end_line_builder.append_value(record.end_line);
 
-         let dim = config::get().dense_dim;
          if record.vector.len() != dim {
             return Err(StoreError::VectorColumnTypeMismatch.into());
          }
@@ -657,7 +671,7 @@ impl LanceStore {
       let vector_values_array = vector_builder.finish();
       let vector_array = FixedSizeListArray::new(
          Arc::new(Field::new("item", DataType::Float32, true)),
-         config::get().dense_dim as i32,
+         dim as i32,
          Arc::new(vector_values_array),
          None,
       );
@@ -702,55 +716,13 @@ impl LanceStore {
    }
 
    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+      debug_assert_eq!(a.len(), b.len(), "cosine_similarity requires equal-length vectors");
       let len = a.len().min(b.len());
       let mut dot = 0.0;
       for i in 0..len {
          dot += a[i] * b[i];
       }
       dot
-   }
-
-   fn maxsim(query_matrix: &[Vec<f32>], doc_matrix: &[Vec<f32>]) -> f32 {
-      let mut total = 0.0;
-      for q_vec in query_matrix {
-         let mut max_score = f32::MIN;
-         for d_vec in doc_matrix {
-            let score = Self::cosine_similarity(q_vec, d_vec);
-            if score > max_score {
-               max_score = score;
-            }
-         }
-         total += max_score;
-      }
-      total
-   }
-
-   fn decode_colbert(colbert_bytes: &[u8], scale: f64) -> Vec<Vec<f32>> {
-      let dim = config::get().colbert_dim;
-      let mut result = Vec::new();
-      let mut i = 0;
-
-      while i + dim <= colbert_bytes.len() {
-         let mut row = Vec::with_capacity(dim);
-         let mut is_padding = true;
-
-         for j in 0..dim {
-            let byte_val = colbert_bytes[i + j] as i8;
-            let val = (byte_val as f32 / 127.0) * scale as f32;
-            if val != 0.0 {
-               is_padding = false;
-            }
-            row.push(val);
-         }
-
-         if !is_padding {
-            result.push(row);
-         }
-
-         i += dim;
-      }
-
-      result
    }
 }
 
@@ -796,44 +768,47 @@ impl super::Store for LanceStore {
       let mut code_filter = format!("{code_clause} AND {anchor_filter}");
       let mut doc_filter = format!("{doc_clause} AND {anchor_filter}");
       let base_filter = if let Some(filter) = params.path_filter {
-         let filter_str = store::path_to_store_key(filter);
+         let filter_str = store::escape_path_for_like(filter);
          let path_clause = format!("path LIKE '{filter_str}%'");
          code_filter = format!("{path_clause} AND {code_clause} AND {anchor_filter}");
          doc_filter = format!("{path_clause} AND {doc_clause} AND {anchor_filter}");
          Some(format!("{path_clause} AND {anchor_filter}"))
       } else {
-         Some(anchor_filter.to_string())
+         Some(anchor_filter.to_owned())
       };
 
-      let code_results_stream = table
-         .query()
-         .nearest_to(params.query_vector)
-         .map_err(StoreError::CreateVectorQuery)?
-         .limit(300)
-         .only_if(&code_filter)
-         .execute()
-         .await
-         .map_err(StoreError::ExecuteCodeSearch)?;
-
-      let doc_results_stream = table
-         .query()
-         .nearest_to(params.query_vector)
-         .map_err(StoreError::CreateVectorQuery)?
-         .only_if(&doc_filter)
-         .limit(50)
-         .execute()
-         .await
-         .map_err(StoreError::ExecuteDocSearch)?;
-
-      let code_batches: Vec<RecordBatch> = code_results_stream
-         .try_collect()
-         .await
-         .map_err(StoreError::CollectCodeResults)?;
-
-      let doc_batches: Vec<RecordBatch> = doc_results_stream
-         .try_collect()
-         .await
-         .map_err(StoreError::CollectDocResults)?;
+      let (code_batches, doc_batches): (Vec<RecordBatch>, Vec<RecordBatch>) = tokio::try_join!(
+         async {
+            let stream = table
+               .query()
+               .nearest_to(params.query_vector)
+               .map_err(StoreError::CreateVectorQuery)?
+               .limit(300)
+               .only_if(&code_filter)
+               .execute()
+               .await
+               .map_err(StoreError::ExecuteCodeSearch)?;
+            stream
+               .try_collect()
+               .await
+               .map_err(StoreError::CollectCodeResults)
+         },
+         async {
+            let stream = table
+               .query()
+               .nearest_to(params.query_vector)
+               .map_err(StoreError::CreateVectorQuery)?
+               .only_if(&doc_filter)
+               .limit(50)
+               .execute()
+               .await
+               .map_err(StoreError::ExecuteDocSearch)?;
+            stream
+               .try_collect()
+               .await
+               .map_err(StoreError::CollectDocResults)
+         },
+      )?;
 
       let fts_query = FullTextSearchQuery::new(params.query_text.to_owned());
       let mut fts_query_builder = table.query().full_text_search(fts_query);
@@ -847,14 +822,17 @@ impl super::Store for LanceStore {
          Err(_) => vec![],
       };
 
-      let mut candidates = Vec::new();
-      let mut seen_keys = HashMap::new();
-
-      for batch in code_batches
+      let all_batches: Vec<&RecordBatch> = code_batches
          .iter()
          .chain(doc_batches.iter())
          .chain(fts_batches.iter())
-      {
+         .collect();
+
+      let estimated_capacity = all_batches.iter().map(|b| b.num_rows()).sum();
+      let mut candidates: Vec<(usize, usize)> = Vec::with_capacity(estimated_capacity);
+      let mut seen_keys: HashSet<(&str, u32)> = HashSet::with_capacity(estimated_capacity);
+
+      for (batch_idx, batch) in all_batches.iter().enumerate() {
          let path_col = batch
             .column_by_name("path")
             .ok_or(StoreError::MissingPathColumn)?
@@ -874,38 +852,37 @@ impl super::Store for LanceStore {
                continue;
             }
 
-            let path = path_col.value(i).to_string();
+            let path = path_col.value(i);
             let start_line = start_line_col.value(i);
 
-            let key = format!("{path}:{start_line}");
-            if seen_keys.contains_key(&key) {
+            if !seen_keys.insert((path, start_line)) {
                continue;
             }
-            seen_keys.insert(key, ());
 
-            candidates.push((i, batch.clone()));
+            candidates.push((batch_idx, i));
          }
       }
 
-      let mut scored_results = Vec::new();
+      let mut scored_results = Vec::with_capacity(candidates.len());
 
-      for (row_idx, batch) in candidates {
+      for (cand_idx, (batch_idx, row_idx)) in candidates.iter().enumerate() {
+         let batch = all_batches[*batch_idx];
          let path: PathBuf = batch
             .column_by_name("path")
             .unwrap()
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap()
-            .value(row_idx)
+            .value(*row_idx)
             .into();
 
          let content_col = batch.column_by_name("content").unwrap();
          let content = if let Some(str_array) = content_col.as_any().downcast_ref::<StringArray>() {
-            str_array.value(row_idx).to_string()
+            str_array.value(*row_idx).to_string()
          } else if let Some(large_str_array) =
             content_col.as_any().downcast_ref::<LargeStringArray>()
          {
-            large_str_array.value(row_idx).to_string()
+            large_str_array.value(*row_idx).to_string()
          } else {
             return Err(StoreError::ContentColumnTypeMismatch.into());
          };
@@ -916,7 +893,7 @@ impl super::Store for LanceStore {
             .as_any()
             .downcast_ref::<UInt32Array>()
             .unwrap()
-            .value(row_idx);
+            .value(*row_idx);
 
          let end_line = batch
             .column_by_name("end_line")
@@ -924,25 +901,25 @@ impl super::Store for LanceStore {
             .as_any()
             .downcast_ref::<UInt32Array>()
             .unwrap()
-            .value(row_idx);
+            .value(*row_idx);
 
          let chunk_type = batch.column_by_name("chunk_type").and_then(|col| {
-            if col.is_null(row_idx) {
+            if col.is_null(*row_idx) {
                None
             } else {
                col.as_any()
                   .downcast_ref::<StringArray>()
-                  .map(|arr| Self::parse_chunk_type(arr.value(row_idx)))
+                  .map(|arr| Self::parse_chunk_type(arr.value(*row_idx)))
             }
          });
 
          let is_anchor = batch.column_by_name("is_anchor").and_then(|col| {
-            if col.is_null(row_idx) {
+            if col.is_null(*row_idx) {
                None
             } else {
                col.as_any()
                   .downcast_ref::<BooleanArray>()
-                  .map(|arr| arr.value(row_idx))
+                  .map(|arr| arr.value(*row_idx))
             }
          });
 
@@ -952,74 +929,41 @@ impl super::Store for LanceStore {
             .as_any()
             .downcast_ref::<FixedSizeListArray>()
             .ok_or(StoreError::VectorColumnTypeMismatch)?;
-         let vector_values = vector_list.value(row_idx);
+         let vector_values = vector_list.value(*row_idx);
          let vector_floats = vector_values
             .as_any()
             .downcast_ref::<Float32Array>()
             .ok_or(StoreError::VectorValuesTypeMismatch)?;
 
-         let doc_vector: Vec<f32> = (0..vector_floats.len())
-            .map(|i| vector_floats.value(i))
-            .collect();
+         let offset = vector_floats.offset();
+         let len = vector_floats.len();
+         let values = vector_floats.values();
+         let doc_vector = &values[offset..offset + len];
 
-         let mut score = Self::cosine_similarity(params.query_vector, &doc_vector);
-
-         if params.rerank
-            && !params.query_colbert.is_empty()
-            && let Some(colbert_col) = batch.column_by_name("colbert")
-            && !colbert_col.is_null(row_idx)
-         {
-            let colbert_binary = if let Some(large_binary_array) =
-               colbert_col.as_any().downcast_ref::<LargeBinaryArray>()
-            {
-               large_binary_array.value(row_idx)
-            } else {
-               &[]
-            };
-
-            if !colbert_binary.is_empty() {
-               let scale = if let Some(scale_col) = batch.column_by_name("colbert_scale") {
-                  if scale_col.is_null(row_idx) {
-                     1.0
-                  } else {
-                     scale_col
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .map_or(1.0, |arr| arr.value(row_idx))
-                  }
-               } else {
-                  1.0
-               };
-
-               let doc_matrix = Self::decode_colbert(colbert_binary, scale);
-               if !doc_matrix.is_empty() {
-                  score = Self::maxsim(params.query_colbert, &doc_matrix);
-               }
-            }
-         }
+         let score = Self::cosine_similarity(params.query_vector, doc_vector);
 
          let mut full_content = String::new();
          let mut context_prev_lines = 0u32;
 
          if let Some(prev_col) = batch.column_by_name("context_prev")
-            && !prev_col.is_null(row_idx)
+            && !prev_col.is_null(*row_idx)
             && let Some(prev_str) = prev_col.as_any().downcast_ref::<StringArray>()
          {
-            let prev_content = prev_str.value(row_idx);
+            let prev_content = prev_str.value(*row_idx);
             context_prev_lines = prev_content.lines().count() as u32;
             full_content.push_str(prev_content);
          }
          full_content.push_str(&content);
          if let Some(next_col) = batch.column_by_name("context_next")
-            && !next_col.is_null(row_idx)
+            && !next_col.is_null(*row_idx)
             && let Some(next_str) = next_col.as_any().downcast_ref::<StringArray>()
          {
-            full_content.push_str(next_str.value(row_idx));
+            full_content.push_str(next_str.value(*row_idx));
          }
 
          let adjusted_start_line = start_line.saturating_sub(context_prev_lines);
 
-         scored_results.push(SearchResult {
+         scored_results.push((cand_idx, SearchResult {
             path,
             content: full_content.into(),
             score,
@@ -1027,14 +971,67 @@ impl super::Store for LanceStore {
             num_lines: end_line.saturating_sub(start_line).max(1),
             chunk_type,
             is_anchor,
-         });
+         }));
       }
 
       scored_results.sort_by(|a, b| {
-         b.score
-            .partial_cmp(&a.score)
+         b.1.score
+            .partial_cmp(&a.1.score)
             .unwrap_or(std::cmp::Ordering::Equal)
       });
+
+      if params.rerank && !params.query_colbert.is_empty() {
+         const RERANK_CAP: usize = 50;
+         let rerank_count = scored_results.len().min(RERANK_CAP);
+
+         for (cand_idx, result) in scored_results.iter_mut().take(rerank_count) {
+            let (batch_idx, row_idx) = candidates[*cand_idx];
+            let batch = all_batches[batch_idx];
+
+            if let Some(colbert_col) = batch.column_by_name("colbert")
+               && !colbert_col.is_null(row_idx)
+            {
+               let colbert_binary = if let Some(large_binary_array) =
+                  colbert_col.as_any().downcast_ref::<LargeBinaryArray>()
+               {
+                  large_binary_array.value(row_idx)
+               } else {
+                  &[]
+               };
+
+               if !colbert_binary.is_empty() {
+                  let scale = if let Some(scale_col) = batch.column_by_name("colbert_scale") {
+                     if scale_col.is_null(row_idx) {
+                        1.0
+                     } else {
+                        scale_col
+                           .as_any()
+                           .downcast_ref::<Float64Array>()
+                           .map_or(1.0, |arr| arr.value(row_idx))
+                     }
+                  } else {
+                     1.0
+                  };
+
+                  result.score = max_sim_quantized(
+                     params.query_colbert,
+                     colbert_binary,
+                     scale,
+                     config::get().colbert_dim,
+                  );
+               }
+            }
+         }
+
+         scored_results.sort_by(|a, b| {
+            b.1.score
+               .partial_cmp(&a.1.score)
+               .unwrap_or(std::cmp::Ordering::Equal)
+         });
+      }
+
+      let mut scored_results: Vec<SearchResult> =
+         scored_results.into_iter().map(|(_, r)| r).collect();
       scored_results.truncate(params.limit);
 
       Ok(SearchResponse { results: scored_results, status: SearchStatus::Ready, progress: None })
@@ -1042,7 +1039,7 @@ impl super::Store for LanceStore {
 
    async fn delete_file(&self, store_id: &str, file_path: &Path) -> Result<()> {
       let table = self.get_table(store_id).await?;
-      let escaped = store::path_to_store_key(file_path);
+      let escaped = store::escape_path_literal(file_path);
       table
          .delete(&format!("path = '{escaped}'"))
          .await
@@ -1067,7 +1064,7 @@ impl super::Store for LanceStore {
       for chunk in unique_paths.chunks(BATCH_SIZE) {
          let escaped: Vec<String> = chunk
             .iter()
-            .map(|p| format!("'{}'", store::path_to_store_key(p)))
+            .map(|p| format!("'{}'", store::escape_path_literal(p)))
             .collect();
          let predicate = format!("path IN ({})", escaped.join(","));
 
@@ -1115,7 +1112,7 @@ impl super::Store for LanceStore {
       let stream_result = table
          .query()
          .only_if("is_anchor = true")
-         .select(Select::Columns(vec!["path".to_string()]))
+         .select(Select::columns(&["path"]))
          .execute()
          .await;
 
@@ -1123,7 +1120,7 @@ impl super::Store for LanceStore {
          Ok(s) => s,
          Err(_) => table
             .query()
-            .select(Select::Columns(vec!["path".to_string()]))
+            .select(Select::columns(&["path"]))
             .execute()
             .await
             .map_err(StoreError::ExecuteQuery)?,
@@ -1188,31 +1185,26 @@ impl super::Store for LanceStore {
    async fn create_vector_index(&self, store_id: &str) -> Result<()> {
       let table = self.get_table(store_id).await?;
 
-      let row_count = table
-         .count_rows(None)
+      let vector_rows = table
+         .count_rows(Some("vector IS NOT NULL".to_string()))
          .await
          .map_err(StoreError::CountRows)?;
 
-      if row_count < 4000 {
+      if vector_rows < 1000 {
          return Ok(());
       }
 
-      let num_partitions = (row_count / 100).clamp(8, 64) as u32;
+      let mut num_partitions = (vector_rows / 100).clamp(8, 64) as u32;
+      num_partitions = num_partitions.min(vector_rows as u32).max(1);
 
       let index = Index::IvfPq(
          lancedb::index::vector::IvfPqIndexBuilder::default().num_partitions(num_partitions),
       );
 
-      table
-         .create_index(&["vector"], index)
-         .execute()
-         .await
-         .map_err(|e| {
-            if matches!(e, lancedb::Error::TableAlreadyExists { .. }) {
-               return StoreError::IndexAlreadyExists;
-            }
-            StoreError::CreateVectorIndex(e)
-         })?;
+      if let Err(e) = table.create_index(&["vector"], index).execute().await {
+         tracing::warn!("skipping vector index for {store_id} (rows={vector_rows}): {e}");
+         return Ok(());
+      }
 
       Ok(())
    }
@@ -1225,7 +1217,7 @@ impl super::Store for LanceStore {
       let stream_result = table
          .query()
          .only_if("is_anchor = true")
-         .select(Select::Columns(vec!["path".to_string(), "hash".to_string()]))
+         .select(Select::columns(&["path", "hash"]))
          .execute()
          .await;
 
@@ -1233,7 +1225,7 @@ impl super::Store for LanceStore {
          Ok(s) => s,
          Err(_) => table
             .query()
-            .select(Select::Columns(vec!["path".to_string(), "hash".to_string()]))
+            .select(Select::columns(&["path", "hash"]))
             .execute()
             .await
             .map_err(StoreError::ExecuteQuery)?,
@@ -1257,7 +1249,10 @@ impl super::Store for LanceStore {
             for i in 0..path_array.len() {
                if !path_array.is_null(i) && !hash_array.is_null(i) {
                   let path = path_array.value(i).into();
-                  let hash = FileHash::from_slice(hash_array.value(i)).expect("invalid hash");
+                  let Some(hash) = FileHash::from_slice(hash_array.value(i)) else {
+                     tracing::warn!("skipping corrupted hash for path: {:?}", path);
+                     continue;
+                  };
                   hashes.insert(path, hash);
                }
             }
