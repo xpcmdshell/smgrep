@@ -1,3 +1,5 @@
+//! IPC protocol for client-server communication over sockets
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -6,21 +8,26 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{Result, error::IpcError, types::SearchResponse};
 
+/// Client request messages
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
+   Hello { git_hash: String },
    Search { query: String, limit: usize, path: Option<PathBuf>, rerank: bool },
    Health,
    Shutdown,
 }
 
+/// Server response messages
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
+   Hello { git_hash: String },
    Search(SearchResponse),
    Health { status: ServerStatus },
    Shutdown { success: bool },
    Error { message: String },
 }
 
+/// Server health status information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerStatus {
    pub indexing: bool,
@@ -28,6 +35,7 @@ pub struct ServerStatus {
    pub files:    usize,
 }
 
+/// Stack-allocated buffer for socket I/O operations
 pub struct SocketBuffer {
    buf: SmallVec<[u8; 2048]>,
 }
@@ -54,6 +62,7 @@ impl SocketBuffer {
       reason = "Generic async function with references - Send bound would be too restrictive for \
                 trait"
    )]
+   /// Serializes and sends a message with length prefix
    pub async fn send<W, T>(&mut self, writer: &mut W, msg: &T) -> Result<()>
    where
       W: AsyncWrite + Unpin,
@@ -69,6 +78,7 @@ impl SocketBuffer {
       Ok(())
    }
 
+   /// Receives and deserializes a message with length prefix
    pub async fn recv<'de, R, T>(&'de mut self, reader: &mut R) -> Result<T>
    where
       R: AsyncRead + Unpin,

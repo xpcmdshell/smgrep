@@ -1,3 +1,5 @@
+//! File system watching with debouncing and ignore pattern support.
+
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use notify::{RecommendedWatcher, RecursiveMode};
@@ -6,18 +8,27 @@ use parking_lot::Mutex;
 
 use super::IgnorePatterns;
 
+/// Action to perform on a watched file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchAction {
+   /// File was created or modified.
    Upsert,
+   /// File was deleted.
    Delete,
 }
 
+/// Watches a directory tree for file system changes with debouncing and ignore
+/// patterns.
 pub struct FileWatcher {
    debouncer: Option<Debouncer<RecommendedWatcher>>,
    root:      PathBuf,
 }
 
 impl FileWatcher {
+   /// Creates a file watcher that monitors the given root path and invokes a
+   /// callback on changes.
+   ///
+   /// Changes are debounced to 300ms and filtered through ignore patterns.
    pub fn new<F>(
       root: PathBuf,
       ignore_patterns: IgnorePatterns,
@@ -66,6 +77,7 @@ impl FileWatcher {
       Ok(Self { debouncer: Some(debouncer), root })
    }
 
+   /// Stops watching the file system and releases resources.
    pub fn stop(&mut self) {
       if let Some(mut debouncer) = self.debouncer.take()
          && let Err(e) = debouncer.watcher().unwatch(&self.root)

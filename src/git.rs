@@ -1,3 +1,5 @@
+//! Git repository utilities for store identification and file tracking
+
 use std::path::{Path, PathBuf};
 
 use git2::Repository;
@@ -5,16 +7,19 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
+/// Checks if a path is a git repository
 pub fn is_git_repo(path: &Path) -> bool {
    Repository::open(path).is_ok()
 }
 
+/// Returns the repository root directory
 pub fn get_repo_root(path: &Path) -> Option<PathBuf> {
    Repository::discover(path)
       .ok()
       .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
 }
 
+/// Returns the URL of the origin remote
 pub fn get_remote_url(repo: &Repository) -> Option<String> {
    repo
       .find_remote("origin")
@@ -22,6 +27,7 @@ pub fn get_remote_url(repo: &Repository) -> Option<String> {
       .and_then(|remote| remote.url().map(|s| s.to_string()))
 }
 
+/// Returns all tracked files in the repository index
 pub fn get_tracked_files(repo: &Repository) -> Result<Vec<PathBuf>> {
    let mut files = Vec::new();
    let index = repo.index().map_err(Error::ReadIndex)?;
@@ -43,6 +49,8 @@ pub fn get_tracked_files(repo: &Repository) -> Result<Vec<PathBuf>> {
    Ok(files)
 }
 
+/// Resolves a store ID from a path, using git remote if available or directory
+/// name and hash
 pub fn resolve_store_id(path: &Path) -> Result<String> {
    let abs_path = path.canonicalize()?;
 
@@ -106,20 +114,20 @@ mod tests {
 
    #[test]
    fn extract_owner_repo_https() {
-      let url = "https://github.com/kris-hansen/osgrep";
-      assert_eq!(extract_owner_repo(url), Some("kris-hansen-osgrep".to_string()));
+      let url = "https://github.com/can1357/smgrep";
+      assert_eq!(extract_owner_repo(url), Some("can1357-smgrep".to_string()));
    }
 
    #[test]
    fn extract_owner_repo_https_with_git() {
-      let url = "https://github.com/kris-hansen/osgrep.git";
-      assert_eq!(extract_owner_repo(url), Some("kris-hansen-osgrep".to_string()));
+      let url = "https://github.com/can1357/smgrep.git";
+      assert_eq!(extract_owner_repo(url), Some("can1357-smgrep".to_string()));
    }
 
    #[test]
    fn extract_owner_repo_ssh() {
-      let url = "git@github.com:kris-hansen/osgrep.git";
-      assert_eq!(extract_owner_repo(url), Some("kris-hansen-osgrep".to_string()));
+      let url = "git@github.com:can1357/smgrep.git";
+      assert_eq!(extract_owner_repo(url), Some("can1357-smgrep".to_string()));
    }
 
    #[test]

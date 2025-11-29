@@ -1,7 +1,10 @@
+//! Ignore pattern handling for filtering files during discovery and watching.
+
 use std::path::Path;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
+/// Default patterns for files and directories to ignore during file discovery.
 const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
    "**/node_modules/**",
    "**/dist/**",
@@ -16,7 +19,6 @@ const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
    "*.bin",
    "*.ipynb",
    "*.pyc",
-   "*.txt",
    "*.onnx",
    "package-lock.json",
    "yarn.lock",
@@ -33,11 +35,15 @@ const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
    "**/.pytest_cache/**",
 ];
 
+/// Manages file and directory ignore patterns from `.gitignore` and `.smignore`
+/// files.
 pub struct IgnorePatterns {
    gitignore: Option<Gitignore>,
 }
 
 impl IgnorePatterns {
+   /// Creates ignore patterns by loading default patterns, `.gitignore`, and
+   /// `.smignore`.
    pub fn new(root: &Path) -> Self {
       let mut builder = GitignoreBuilder::new(root);
 
@@ -58,6 +64,7 @@ impl IgnorePatterns {
       Self { gitignore: builder.build().ok() }
    }
 
+   /// Checks whether a path matches any ignore patterns.
    pub fn is_ignored(&self, path: &Path) -> bool {
       if let Some(ref gi) = self.gitignore {
          gi.matched(path, path.is_dir()).is_ignore()

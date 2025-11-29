@@ -131,7 +131,7 @@ Runs a background daemon with file watching for instant searches.
 
 - Keeps LanceDB and embedding models resident for fast responses
 - Watches the repo and incrementally re-indexes on change
-- Communicates via Unix socket
+- Communicates via Unix socket (or TCP on Windows)
 
 ```bash
 smgrep serve              # Start daemon for current repo
@@ -145,6 +145,16 @@ Stop running daemons.
 ```bash
 smgrep stop               # Stop daemon for current repo
 smgrep stop-all           # Stop all smgrep daemons
+```
+
+### `smgrep clean`
+
+Remove index data and metadata for a store.
+
+```bash
+smgrep clean              # Clean current directory's store
+smgrep clean my-store     # Clean specific store by ID
+smgrep clean --all        # Clean all stores
 ```
 
 ### `smgrep status`
@@ -205,7 +215,7 @@ smgrep combines several techniques for high-quality semantic search:
 
 5. **Incremental Indexing:** File watcher detects changes and updates only affected chunks.
 
-**Supported languages:** TypeScript, JavaScript, Python, Go, Rust, C, C++, Java, Ruby, PHP, Swift, HTML, CSS, Bash, JSON, YAML
+**Supported languages (37):** TypeScript, TSX, JavaScript, Python, Go, Rust, C, C++, C#, Java, Kotlin, Scala, Ruby, PHP, Elixir, Haskell, OCaml, Julia, Zig, Lua, Odin, Objective-C, Verilog, HTML, CSS, XML, Markdown, JSON, YAML, TOML, Bash, Make, Starlark, HCL, Terraform, Diff, Regex
 
 ## Configuration
 
@@ -222,7 +232,7 @@ smgrep uses a TOML config file at `~/.smgrep/config.toml`. All options can also 
 
 # Dense embedding model (HuggingFace model ID)
 # Used for initial semantic similarity search
-dense_model = "ibm-granite/granite-embedding-30m-english"
+dense_model = "ibm-granite/granite-embedding-small-english-r2"
 
 # ColBERT reranking model (HuggingFace model ID)
 # Used for precise reranking of search results
@@ -263,6 +273,9 @@ fast_mode = false
 # ============================================================================
 # Server
 # ============================================================================
+
+# TCP port for daemon communication
+port = 4444
 
 # Idle timeout: shutdown daemon after this many seconds of inactivity
 idle_timeout_secs = 1800  # 30 minutes
@@ -350,7 +363,7 @@ cargo test
 
 ## Acknowledgments
 
-smgrep is inspired by [osgrep](https://github.com/kris-hansen/osgrep) and [mgrep](https://github.com/mixedbread-ai/mgrep) by MixedBread.
+smgrep is inspired by [osgrep](https://github.com/Ryandonofrio3/osgrep) and [mgrep](https://github.com/mixedbread-ai/mgrep) by MixedBread.
 
 ## License
 

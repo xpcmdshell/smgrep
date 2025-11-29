@@ -1,3 +1,5 @@
+//! JSON output formatter for search results.
+
 use serde::Serialize;
 
 use super::Formatter;
@@ -24,7 +26,7 @@ impl From<&SearchResult> for JsonResult {
    fn from(result: &SearchResult) -> Self {
       let chunk_type = result
          .chunk_type
-         .map_or_else(String::new, |ct| format!("{ct:?}").to_lowercase());
+         .map_or_else(String::new, |ct| ct.as_lowercase_str().to_string());
 
       Self {
          path: result.path.display().to_string(),
@@ -38,6 +40,7 @@ impl From<&SearchResult> for JsonResult {
    }
 }
 
+/// Formats search results as JSON with structured metadata.
 pub struct JsonFormatter;
 
 impl Formatter for JsonFormatter {
@@ -46,8 +49,7 @@ impl Formatter for JsonFormatter {
 
       let output = JsonOutput { count: json_results.len(), results: json_results };
 
-      serde_json::to_string_pretty(&output)
-         .unwrap_or_else(|_| r#"{"results": [], "count": 0}"#.to_string())
+      serde_json::to_string(&output).unwrap_or_else(|_| r#"{"results":[],"count":0}"#.to_string())
    }
 }
 
@@ -82,12 +84,12 @@ mod tests {
       let formatter = JsonFormatter;
       let output = formatter.format(&results, false, false);
 
-      assert!(output.contains("\"count\": 2"));
+      assert!(output.contains("\"count\":2"));
       assert!(output.contains("src/main.rs"));
       assert!(output.contains("src/lib.rs"));
-      assert!(output.contains("\"score\": 0.95"));
-      assert!(output.contains("\"is_anchor\": true"));
-      assert!(output.contains("\"chunk_type\": \"function\""));
+      assert!(output.contains("\"score\":0.95"));
+      assert!(output.contains("\"is_anchor\":true"));
+      assert!(output.contains("\"chunk_type\":\"function\""));
    }
 
    #[test]
@@ -96,7 +98,7 @@ mod tests {
       let formatter = JsonFormatter;
       let output = formatter.format(&results, false, false);
 
-      assert!(output.contains("\"count\": 0"));
-      assert!(output.contains("\"results\": []"));
+      assert!(output.contains("\"count\":0"));
+      assert!(output.contains("\"results\":[]"));
    }
 }

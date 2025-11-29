@@ -1,3 +1,5 @@
+//! Zero-copy string type with cheap slicing
+
 use std::{
    borrow::Borrow,
    fmt,
@@ -9,42 +11,50 @@ use std::{
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// String type with cheap cloning and slicing using reference counting
 #[derive(Clone, Default)]
 pub struct Str(Bytes);
 
 impl Str {
+   /// Creates a string from an owned String
    #[inline]
    pub fn from_string(s: String) -> Self {
       Self(Bytes::from(s.into_bytes()))
    }
 
+   /// Creates a string by copying from a string slice
    #[inline]
    pub fn copy_from_str(s: &str) -> Self {
       Self(Bytes::copy_from_slice(s.as_bytes()))
    }
 
+   /// Creates a string from a static string slice without copying
    #[inline]
    pub const fn from_static(s: &'static str) -> Self {
       Self(Bytes::from_static(s.as_bytes()))
    }
 
+   /// Creates a string from bytes, validating UTF-8
    #[inline]
    pub fn from_bytes(bytes: Bytes) -> Result<Self, Utf8Error> {
       std::str::from_utf8(&bytes)?;
       Ok(Self(bytes))
    }
 
+   /// Creates a slice from a substring reference without copying
    #[inline]
    pub fn slice_ref(&self, slice: &str) -> Self {
       Self(self.0.slice_ref(slice.as_bytes()))
    }
 
+   /// Creates a string from bytes, replacing invalid UTF-8
    #[inline]
    pub fn from_utf8_lossy(bytes: &[u8]) -> Self {
       let s = String::from_utf8_lossy(bytes);
-      Self::from_string(s.to_string())
+      Self::from_string(s.into_owned())
    }
 
+   /// Returns the string as a str slice
    #[inline]
    pub fn as_str(&self) -> &str {
       // SAFETY: validated UTF-8 on construction (from_string, from_static,
@@ -52,12 +62,14 @@ impl Str {
       unsafe { std::str::from_utf8_unchecked(&self.0) }
    }
 
+   /// Creates a substring slice by byte range without copying
    #[inline]
    #[must_use]
    pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
       Self(self.0.slice(range))
    }
 
+   /// Returns a trimmed view without copying
    #[inline]
    #[must_use]
    pub fn trim(&self) -> Self {
@@ -66,11 +78,12 @@ impl Str {
       if trimmed.len() == s.len() {
          return self.clone();
       }
-      let start = s.as_ptr() as usize - self.0.as_ptr() as usize + (s.len() - s.trim_start().len());
+      let start = s.len() - s.trim_start().len();
       let end = start + trimmed.len();
       self.slice(start..end)
    }
 
+   /// Returns a start-trimmed view without copying
    #[inline]
    #[must_use]
    pub fn trim_start(&self) -> Self {
@@ -83,6 +96,7 @@ impl Str {
       self.slice(start..)
    }
 
+   /// Returns an end-trimmed view without copying
    #[inline]
    #[must_use]
    pub fn trim_end(&self) -> Self {
@@ -104,9 +118,12 @@ impl Str {
       self.0.len()
    }
 
+   /// Converts to an owned String
    #[inline]
    pub fn into_string(self) -> String {
-      String::from_utf8(self.0.into()).expect("Str is always valid UTF-8")
+      // SAFETY: Str is always valid UTF-8 (validated on construction via from_string,
+      // from_static, from_bytes, or from_utf8_lossy)
+      unsafe { String::from_utf8_unchecked(self.0.into()) }
    }
 }
 

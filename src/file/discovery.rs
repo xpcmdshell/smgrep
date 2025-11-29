@@ -1,3 +1,5 @@
+//! File discovery for local file systems and git repositories.
+
 use std::{
    fs,
    path::{Path, PathBuf},
@@ -6,51 +8,27 @@ use std::{
 
 use git2::Repository;
 
-use crate::error::{Error, Result};
+use crate::{
+   error::{Error, Result},
+   grammar::EXTENSION_MAP,
+};
 
-const SUPPORTED_EXTENSIONS: &[&str] = &[
-   "ts",
-   "tsx",
-   "js",
-   "jsx",
-   "py",
-   "go",
-   "rs",
-   "java",
-   "c",
-   "cpp",
-   "h",
-   "hpp",
-   "cs",
-   "rb",
-   "php",
+/// Additional extensions for text-based files without tree-sitter grammar
+/// support. Extensions with grammar support are derived from [`EXTENSION_MAP`].
+const ADDITIONAL_EXTENSIONS: &[&str] = &[
    "swift",
-   "kt",
-   "scala",
    "vue",
    "svelte",
-   "json",
-   "yaml",
-   "yml",
-   "toml",
-   "md",
    "txt",
    "sql",
-   "sh",
-   "bash",
    "zsh",
    "dockerfile",
-   "makefile",
    "el",
    "clj",
    "cljs",
    "cljc",
    "edn",
-   "ex",
-   "exs",
    "dart",
-   "m",
-   "mm",
    "f90",
    "f95",
    "f03",
@@ -62,27 +40,23 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
    "proto",
    "graphql",
    "gql",
-   "tf",
-   "tfvars",
-   "lua",
    "r",
    "R",
-   "jl",
-   "hs",
-   "ml",
-   "mli",
    "nim",
-   "zig",
-   "v",
    "cr",
 ];
 
+/// Maximum file size in bytes (1 MB) for files to be included in discovery.
 const MAX_FILE_SIZE: u64 = 1024 * 1024;
 
+/// Abstraction for file system operations to discover source files.
 pub trait FileSystem {
+   /// Returns an iterator of all discoverable files under the given root path.
    fn get_files(&self, root: &Path) -> Result<Box<dyn Iterator<Item = PathBuf>>>;
 }
 
+/// Local file system implementation that discovers files via git or directory
+/// traversal.
 pub struct LocalFileSystem;
 
 impl LocalFileSystem {
@@ -94,12 +68,16 @@ impl LocalFileSystem {
       let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
       let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
 
-      SUPPORTED_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+      // Check grammar-supported extensions first
+      EXTENSION_MAP.iter().any(|(e, _)| ext.eq_ignore_ascii_case(e))
+         // Then additional text-based extensions
+         || ADDITIONAL_EXTENSIONS.iter().any(|&e| ext.eq_ignore_ascii_case(e))
+         // Special filename patterns
          || filename.eq_ignore_ascii_case("dockerfile")
          || filename.eq_ignore_ascii_case("makefile")
    }
 
-   fn should_include_file(path: &Path) -> bool {
+   fn should_include_file(path: &Path, metadata: Option<&fs::Metadata>) -> bool {
       if !Self::is_supported_extension(path) {
          return false;
       }
@@ -110,13 +88,13 @@ impl LocalFileSystem {
          return false;
       }
 
-      if let Ok(metadata) = fs::metadata(path)
-         && metadata.len() > MAX_FILE_SIZE
-      {
-         return false;
+      // Check file size if metadata provided, otherwise check via fs
+      match metadata {
+         Some(m) => m.len() <= MAX_FILE_SIZE,
+         None => fs::metadata(path)
+            .map(|m| m.len() <= MAX_FILE_SIZE)
+            .unwrap_or(true),
       }
-
-      true
    }
 
    fn get_git_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -130,7 +108,7 @@ impl LocalFileSystem {
          let path_bytes = entry.path.as_slice();
          if let Ok(path_str) = std::str::from_utf8(path_bytes) {
             let file_path = root.join(path_str);
-            if file_path.exists() && Self::should_include_file(&file_path) {
+            if file_path.exists() && Self::should_include_file(&file_path, None) {
                files.push(file_path);
             }
          }
@@ -145,7 +123,7 @@ impl LocalFileSystem {
       {
          for line in String::from_utf8_lossy(&output.stdout).lines() {
             let file_path = root.join(line);
-            if file_path.exists() && Self::should_include_file(&file_path) {
+            if file_path.exists() && Self::should_include_file(&file_path, None) {
                files.push(file_path);
             }
          }
@@ -178,7 +156,11 @@ impl LocalFileSystem {
             continue;
          }
 
-         if path.is_dir() {
+         let Ok(file_type) = entry.file_type() else {
+            continue;
+         };
+
+         if file_type.is_dir() {
             if path != root && Self::is_git_repository(&path) {
                if let Ok(git_files) = Self::get_git_files(&path) {
                   files.extend(git_files);
@@ -188,7 +170,10 @@ impl LocalFileSystem {
             } else {
                files.extend(Self::get_walkdir_files_recursive(&path, root));
             }
-         } else if path.is_file() && Self::should_include_file(&path) {
+         } else if file_type.is_file()
+            && let Ok(metadata) = entry.metadata()
+            && Self::should_include_file(&path, Some(&metadata))
+         {
             files.push(path);
          }
       }
@@ -229,7 +214,7 @@ mod tests {
 
    #[test]
    fn hidden_files_filtered() {
-      assert!(!LocalFileSystem::should_include_file(Path::new(".hidden.rs")));
-      assert!(LocalFileSystem::should_include_file(Path::new("visible.rs")));
+      assert!(!LocalFileSystem::should_include_file(Path::new(".hidden.rs"), None));
+      assert!(LocalFileSystem::should_include_file(Path::new("visible.rs"), None));
    }
 }

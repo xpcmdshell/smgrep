@@ -1,3 +1,5 @@
+//! Text-based output formatters for different use cases.
+
 use std::path::Path;
 
 use console::Style;
@@ -11,6 +13,7 @@ use syntect::{
 use super::{Formatter, detect_language, get_semantic_tags, truncate_line};
 use crate::types::{ChunkType, SearchResult};
 
+/// Rich TTY formatter with syntax highlighting, colors, and line numbers.
 pub struct HumanFormatter {
    syntax_set: SyntaxSet,
    theme_set:  ThemeSet,
@@ -55,7 +58,8 @@ impl HumanFormatter {
       }
    }
 
-   fn merge_adjacent_results(mut results: Vec<SearchResult>) -> Vec<SearchResult> {
+   fn merge_adjacent_results(results: &[SearchResult]) -> Vec<SearchResult> {
+      let mut results = results.to_vec();
       if results.is_empty() {
          return results;
       }
@@ -99,7 +103,7 @@ impl Formatter for HumanFormatter {
          return "No results found.".to_string();
       }
 
-      let merged = Self::merge_adjacent_results(results.to_vec());
+      let merged = Self::merge_adjacent_results(results);
       let file_count = merged
          .iter()
          .map(|r| &r.path)
@@ -150,17 +154,21 @@ impl Formatter for HumanFormatter {
          )
          .unwrap();
 
-         let lines: Vec<String> = result.content.lines().map(|s| s.to_string()).collect();
          let max_lines = if show_content { usize::MAX } else { 12 };
-         let display_lines = if lines.len() > max_lines {
-            let mut truncated = lines[..max_lines].to_vec();
-            truncated.push(format!("... (+{} more lines)", lines.len() - max_lines));
-            truncated
+         let line_count = result.content.lines().count();
+         let code = if line_count > max_lines {
+            let mut s: String = result
+               .content
+               .lines()
+               .take(max_lines)
+               .collect::<Vec<_>>()
+               .join("\n");
+            use std::fmt::Write;
+            write!(s, "\n... (+{} more lines)", line_count - max_lines).unwrap();
+            s
          } else {
-            lines
+            result.content.to_string()
          };
-
-         let code = display_lines.join("\n");
          let highlighted = self.highlight_code(&code, detect_language(Path::new(&result.path)));
 
          for (line_idx, line) in highlighted.lines().enumerate() {
@@ -182,6 +190,10 @@ impl Formatter for HumanFormatter {
    }
 }
 
+/// Compact pipe-friendly formatter optimized for LLM consumption.
+///
+/// Produces clean output with minimal noise, suitable for piping to other tools
+/// or AI agents.
 pub struct AgentFormatter;
 
 impl Default for AgentFormatter {
@@ -201,18 +213,21 @@ impl AgentFormatter {
 
       snippet
          .split('\n')
-         .map(|line| {
-            let mut next = line.trim_end().to_string();
-            if let Some(idx) = next.find("File:") {
-               next = next[..idx].trim_end().to_string();
+         .filter_map(|line| {
+            let trimmed_end = line.trim_end();
+            let processed = if let Some(idx) = trimmed_end.find("File:") {
+               trimmed_end[..idx].trim_end()
+            } else {
+               trimmed_end
+            };
+
+            let trimmed = processed.trim();
+            if !trimmed.is_empty() && !NOISE_PREFIXES.iter().any(|p| trimmed.starts_with(p)) {
+               Some(truncate_line(processed, 140).into_owned())
+            } else {
+               None
             }
-            next
          })
-         .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.is_empty() && !NOISE_PREFIXES.iter().any(|p| trimmed.starts_with(p))
-         })
-         .map(|line| truncate_line(&line, 140))
          .collect()
    }
 }
@@ -262,25 +277,27 @@ impl Formatter for AgentFormatter {
       }
 
       use std::fmt::Write;
-      write!(output, "osgrep results ({} matches across {} files)", results.len(), file_count)
+      write!(output, "smgrep results ({} matches across {} files)", results.len(), file_count)
          .unwrap();
 
       output.trim().to_string()
    }
 }
 
+/// Minimal formatter that outputs only unique file paths.
+///
+/// Equivalent to `grep -l`, useful for listing files containing matches.
 pub struct CompactFormatter;
 
 impl Formatter for CompactFormatter {
    fn format(&self, results: &[SearchResult], _show_scores: bool, _show_content: bool) -> String {
       let mut unique_paths: Vec<String> = results
          .iter()
-         .map(|r| r.path.to_string_lossy().to_string())
-         .collect::<std::collections::HashSet<_>>()
-         .into_iter()
+         .map(|r| r.path.display().to_string())
          .collect();
 
       unique_paths.sort();
+      unique_paths.dedup();
       unique_paths.join("\n")
    }
 }

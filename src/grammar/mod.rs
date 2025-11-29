@@ -1,9 +1,8 @@
-use std::{
-   fs,
-   path::{Path, PathBuf},
-   time::Duration,
-};
+//! Tree-sitter grammar management and loading
 
+use std::path::{Path, PathBuf};
+
+use tokio::fs;
 use tree_sitter::{Language, Parser, WasmStore, wasmtime};
 
 use crate::{
@@ -11,9 +10,12 @@ use crate::{
    error::{ChunkerError, ConfigError, Error, Result},
 };
 
+/// Language name and URL pair for grammar downloads
 pub type GrammarPair = (&'static str, &'static str);
 
+/// URLs for downloading tree-sitter WASM grammars
 pub const GRAMMAR_URLS: &[GrammarPair] = &[
+    // tree-sitter organization (official)
     ("typescript", "https://github.com/tree-sitter/tree-sitter-typescript/releases/latest/download/tree-sitter-typescript.wasm"),
     ("tsx",        "https://github.com/tree-sitter/tree-sitter-typescript/releases/latest/download/tree-sitter-tsx.wasm"),
     ("python",     "https://github.com/tree-sitter/tree-sitter-python/releases/latest/download/tree-sitter-python.wasm"),
@@ -29,8 +31,33 @@ pub const GRAMMAR_URLS: &[GrammarPair] = &[
     ("css",        "https://github.com/tree-sitter/tree-sitter-css/releases/latest/download/tree-sitter-css.wasm"),
     ("bash",       "https://github.com/tree-sitter/tree-sitter-bash/releases/latest/download/tree-sitter-bash.wasm"),
     ("json",       "https://github.com/tree-sitter/tree-sitter-json/releases/latest/download/tree-sitter-json.wasm"),
+    ("c_sharp",    "https://github.com/tree-sitter/tree-sitter-c-sharp/releases/latest/download/tree-sitter-c_sharp.wasm"),
+    ("scala",      "https://github.com/tree-sitter/tree-sitter-scala/releases/latest/download/tree-sitter-scala.wasm"),
+    ("haskell",    "https://github.com/tree-sitter/tree-sitter-haskell/releases/latest/download/tree-sitter-haskell.wasm"),
+    ("ocaml",      "https://github.com/tree-sitter/tree-sitter-ocaml/releases/latest/download/tree-sitter-ocaml.wasm"),
+    ("regex",      "https://github.com/tree-sitter/tree-sitter-regex/releases/latest/download/tree-sitter-regex.wasm"),
+    ("julia",      "https://github.com/tree-sitter/tree-sitter-julia/releases/latest/download/tree-sitter-julia.wasm"),
+    ("verilog",    "https://github.com/tree-sitter/tree-sitter-verilog/releases/latest/download/tree-sitter-verilog.wasm"),
+    // tree-sitter-grammars organization
+    ("zig",        "https://github.com/tree-sitter-grammars/tree-sitter-zig/releases/latest/download/tree-sitter-zig.wasm"),
+    ("lua",        "https://github.com/tree-sitter-grammars/tree-sitter-lua/releases/latest/download/tree-sitter-lua.wasm"),
+    ("yaml",       "https://github.com/tree-sitter-grammars/tree-sitter-yaml/releases/latest/download/tree-sitter-yaml.wasm"),
+    ("toml",       "https://github.com/tree-sitter-grammars/tree-sitter-toml/releases/latest/download/tree-sitter-toml.wasm"),
+    ("markdown",   "https://github.com/tree-sitter-grammars/tree-sitter-markdown/releases/latest/download/tree-sitter-markdown.wasm"),
+    ("kotlin",     "https://github.com/tree-sitter-grammars/tree-sitter-kotlin/releases/latest/download/tree-sitter-kotlin.wasm"),
+    ("make",       "https://github.com/tree-sitter-grammars/tree-sitter-make/releases/latest/download/tree-sitter-make.wasm"),
+    ("objc",       "https://github.com/tree-sitter-grammars/tree-sitter-objc/releases/latest/download/tree-sitter-objc.wasm"),
+    ("diff",       "https://github.com/tree-sitter-grammars/tree-sitter-diff/releases/latest/download/tree-sitter-diff.wasm"),
+    ("xml",        "https://github.com/tree-sitter-grammars/tree-sitter-xml/releases/latest/download/tree-sitter-xml.wasm"),
+    ("starlark",   "https://github.com/tree-sitter-grammars/tree-sitter-starlark/releases/latest/download/tree-sitter-starlark.wasm"),
+    ("hcl",        "https://github.com/tree-sitter-grammars/tree-sitter-hcl/releases/latest/download/tree-sitter-hcl.wasm"),
+    ("terraform",  "https://github.com/tree-sitter-grammars/tree-sitter-hcl/releases/latest/download/tree-sitter-terraform.wasm"),
+    ("odin",       "https://github.com/tree-sitter-grammars/tree-sitter-odin/releases/latest/download/tree-sitter-odin.wasm"),
+    // elixir-lang organization
+    ("elixir",     "https://github.com/elixir-lang/tree-sitter-elixir/releases/latest/download/tree-sitter-elixir.wasm"),
 ];
 
+/// Maps file extensions to language names
 pub static EXTENSION_MAP: &[(&str, &str)] = &[
    ("js", "javascript"),
    ("mjs", "javascript"),
@@ -62,13 +89,51 @@ pub static EXTENSION_MAP: &[(&str, &str)] = &[
    ("sh", "bash"),
    ("bash", "bash"),
    ("json", "json"),
+   ("cs", "c_sharp"),
+   ("scala", "scala"),
+   ("sc", "scala"),
+   ("hs", "haskell"),
+   ("lhs", "haskell"),
+   ("ml", "ocaml"),
+   ("mli", "ocaml"),
+   ("zig", "zig"),
+   ("lua", "lua"),
+   ("yaml", "yaml"),
+   ("yml", "yaml"),
+   ("toml", "toml"),
+   ("md", "markdown"),
+   ("markdown", "markdown"),
+   ("ex", "elixir"),
+   ("exs", "elixir"),
+   ("jl", "julia"),
+   ("v", "verilog"),
+   ("sv", "verilog"),
+   ("svh", "verilog"),
+   ("kt", "kotlin"),
+   ("kts", "kotlin"),
+   ("makefile", "make"),
+   ("mk", "make"),
+   ("m", "objc"),
+   ("mm", "objc"),
+   ("diff", "diff"),
+   ("patch", "diff"),
+   ("xml", "xml"),
+   ("xsl", "xml"),
+   ("xslt", "xml"),
+   ("xsd", "xml"),
+   ("bzl", "starlark"),
+   ("star", "starlark"),
+   ("hcl", "hcl"),
+   ("tf", "terraform"),
+   ("tfvars", "terraform"),
+   ("odin", "odin"),
 ];
 
+/// Manages downloading, caching, and loading tree-sitter grammars
 pub struct GrammarManager {
-   grammar_dir:   PathBuf,
-   engine:        wasmtime::Engine,
-   languages:     moka::future::Cache<&'static str, Language>,
-   auto_download: bool,
+   grammar_dir: PathBuf,
+   engine:      wasmtime::Engine,
+   languages:   moka::future::Cache<&'static str, Language>,
 }
 
 impl std::fmt::Debug for GrammarManager {
@@ -76,7 +141,6 @@ impl std::fmt::Debug for GrammarManager {
       f.debug_struct("GrammarManager")
          .field("languages", &self.languages)
          .field("grammars_dir", &self.grammar_dir)
-         .field("auto_download", &self.auto_download)
          .finish()
    }
 }
@@ -86,26 +150,25 @@ impl GrammarManager {
       Self::with_auto_download(true)
    }
 
-   pub fn with_auto_download(auto_download: bool) -> Result<Self> {
+   pub fn with_auto_download(_auto_download: bool) -> Result<Self> {
       let grammar_dir = config::grammar_dir();
-      fs::create_dir_all(grammar_dir).map_err(ConfigError::CreateGrammarsDir)?;
+      std::fs::create_dir_all(grammar_dir).map_err(ConfigError::CreateGrammarsDir)?;
 
       let engine = wasmtime::Engine::default();
 
       Ok(Self {
          grammar_dir: grammar_dir.clone(),
          engine,
-         languages: moka::future::Cache::builder()
-            .time_to_idle(Duration::from_secs(5 * 60))
-            .build(),
-         auto_download,
+         languages: moka::future::Cache::builder().max_capacity(32).build(),
       })
    }
 
+   /// Returns the directory where grammars are stored
    pub fn grammar_dir(&self) -> &Path {
       &self.grammar_dir
    }
 
+   /// Converts a file extension to a language name
    pub fn extension_to_language(ext: &str) -> Option<&'static str> {
       EXTENSION_MAP
          .iter()
@@ -113,6 +176,7 @@ impl GrammarManager {
          .map(|(_, lang)| *lang)
    }
 
+   /// Returns the download URL for a grammar by language name
    pub fn grammar_url(lang: &str) -> Option<&'static str> {
       GRAMMAR_URLS
          .iter()
@@ -120,14 +184,17 @@ impl GrammarManager {
          .map(|(_, url)| *url)
    }
 
+   /// Returns the filesystem path for a grammar WASM file
    pub fn grammar_path(&self, lang: &str) -> PathBuf {
       self.grammar_dir.join(format!("tree-sitter-{lang}.wasm"))
    }
 
+   /// Checks if a grammar is available locally
    pub fn is_available(&self, lang: &str) -> bool {
       self.grammar_path(lang).exists()
    }
 
+   /// Returns an iterator of languages available locally
    pub fn available_languages(&self) -> impl Iterator<Item = &'static str> + Clone {
       GRAMMAR_URLS
          .iter()
@@ -135,6 +202,7 @@ impl GrammarManager {
          .map(|(lang, _)| *lang)
    }
 
+   /// Returns an iterator of languages not available locally
    pub fn missing_languages(&self) -> impl Iterator<Item = &'static str> + Clone {
       GRAMMAR_URLS
          .iter()
@@ -149,11 +217,13 @@ impl GrammarManager {
          .map_err(|e| ChunkerError::LoadLanguage { lang: lang.to_string(), reason: e }.into())
    }
 
+   /// Downloads and loads a grammar, using cached version if available
    pub async fn download_grammar(&self, pair: GrammarPair) -> Result<Language> {
       let (lang, url) = pair;
       let dest = self.grammar_path(lang);
       if dest.exists() {
          let language = fs::read(&dest)
+            .await
             .map_err(Error::from)
             .and_then(|bytes| self.load_language(lang, &bytes));
          if let Ok(language) = language {
@@ -180,11 +250,14 @@ impl GrammarManager {
 
       let language = self.load_language(lang, &bytes)?;
 
-      fs::write(&dest, &bytes).map_err(ConfigError::WriteWasmFile)?;
+      fs::write(&dest, &bytes)
+         .await
+         .map_err(ConfigError::WriteWasmFile)?;
 
       Ok(language)
    }
 
+   /// Gets a language by name, downloading if necessary
    pub async fn get_language(&self, lang: &str) -> Result<Option<Language>> {
       let pair = GRAMMAR_URLS
          .iter()
@@ -193,13 +266,23 @@ impl GrammarManager {
          return Ok(None);
       };
 
-      let cache = self
-         .languages
-         .try_get_with(pair.0, async { self.download_grammar(*pair).await })
-         .await?;
-      Ok(Some(cache))
+      if let Some(cached) = self.languages.get(&pair.0).await {
+         return Ok(Some(cached));
+      }
+
+      let language = match self.download_grammar(*pair).await {
+         Ok(lang) => lang,
+         Err(e) => {
+            tracing::warn!("failed to download grammar for {}: {}", pair.0, e);
+            return Err(e);
+         },
+      };
+
+      self.languages.insert(pair.0, language.clone()).await;
+      Ok(Some(language))
    }
 
+   /// Gets a language for a file path based on its extension
    pub async fn get_language_for_path(&self, path: &Path) -> Result<Option<Language>> {
       let lang = path
          .extension()
@@ -211,6 +294,7 @@ impl GrammarManager {
       self.get_language(lang).await
    }
 
+   /// Creates a new parser and WASM store for parsing
    pub fn create_parser_with_store(&self) -> Result<(Parser, WasmStore)> {
       let parser = Parser::new();
       let store = WasmStore::new(&self.engine).map_err(ChunkerError::CreateWasmStore)?;

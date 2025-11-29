@@ -1,10 +1,11 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 use crate::{Str, meta::FileHash};
 
+/// Type of code chunk extracted from source files
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChunkType {
@@ -17,8 +18,24 @@ pub enum ChunkType {
    Other,
 }
 
+impl ChunkType {
+   pub const fn as_lowercase_str(self) -> &'static str {
+      match self {
+         Self::Function => "function",
+         Self::Class => "class",
+         Self::Interface => "interface",
+         Self::Method => "method",
+         Self::TypeAlias => "typealias",
+         Self::Block => "block",
+         Self::Other => "other",
+      }
+   }
+}
+
+/// Stack-optimized vector for context information (usually small)
 pub type ContextVec = SmallVec<[Str; 4]>;
 
+/// Parsed code chunk with location and context information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chunk {
    pub content:     Str,
@@ -57,10 +74,13 @@ impl Chunk {
    }
 }
 
+/// Chunk prepared for embedding with file hash and identifier
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreparedChunk {
    pub id:           String,
-   pub path:         PathBuf,
+   #[serde(serialize_with = "crate::serde_arc_pathbuf::serialize")]
+   #[serde(deserialize_with = "crate::serde_arc_pathbuf::deserialize")]
+   pub path:         Arc<PathBuf>,
    pub hash:         FileHash,
    pub content:      Str,
    pub start_line:   u32,
@@ -72,10 +92,11 @@ pub struct PreparedChunk {
    pub context_next: Option<Str>,
 }
 
+/// Chunk with embedding vectors ready for storage in vector database
 #[derive(Debug, Clone)]
 pub struct VectorRecord {
    pub id:            String,
-   pub path:          PathBuf,
+   pub path:          Arc<PathBuf>,
    pub hash:          FileHash,
    pub content:       Str,
    pub start_line:    u32,
@@ -90,6 +111,7 @@ pub struct VectorRecord {
    pub colbert_scale: f64,
 }
 
+/// Individual search result with location and relevance score
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
    pub path:       PathBuf,
@@ -101,6 +123,7 @@ pub struct SearchResult {
    pub is_anchor:  Option<bool>,
 }
 
+/// Current indexing status of the search system
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchStatus {
@@ -108,6 +131,7 @@ pub enum SearchStatus {
    Indexing,
 }
 
+/// Response from a semantic search query
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResponse {
    pub results:  Vec<SearchResult>,
@@ -115,6 +139,7 @@ pub struct SearchResponse {
    pub progress: Option<u8>,
 }
 
+/// Metadata about a vector store instance
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreInfo {
    pub store_id:  String,
@@ -122,6 +147,7 @@ pub struct StoreInfo {
    pub path:      PathBuf,
 }
 
+/// Progress tracking for indexing operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncProgress {
    pub processed:    usize,

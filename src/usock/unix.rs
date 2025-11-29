@@ -1,3 +1,5 @@
+//! Unix domain socket implementation for Unix platforms
+
 use std::{
    fs, io,
    path::PathBuf,
@@ -13,10 +15,12 @@ use tokio::{
 use super::SocketError;
 use crate::{Result, config};
 
+/// Returns the socket file path for a store ID
 pub fn socket_path(store_id: &str) -> PathBuf {
    config::socket_dir().join(format!("{store_id}.sock"))
 }
 
+/// Lists all running servers by checking for socket files
 pub fn list_running_servers() -> Vec<String> {
    let dir = config::socket_dir();
    if !dir.exists() {
@@ -37,16 +41,19 @@ pub fn list_running_servers() -> Vec<String> {
       .collect()
 }
 
+/// Removes the socket file for a store ID
 pub fn remove_socket(store_id: &str) {
    let _ = fs::remove_file(socket_path(store_id));
 }
 
+/// Unix domain socket listener
 pub struct Listener {
    inner: TokioUnixListener,
    path:  PathBuf,
 }
 
 impl Listener {
+   /// Binds to a Unix domain socket path
    pub async fn bind(store_id: &str) -> Result<Self> {
       let path = socket_path(store_id);
 
@@ -65,11 +72,13 @@ impl Listener {
       Ok(Self { inner, path })
    }
 
+   /// Accepts an incoming connection
    pub async fn accept(&self) -> Result<Stream> {
       let (stream, _) = self.inner.accept().await.map_err(SocketError::Accept)?;
       Ok(Stream { inner: stream })
    }
 
+   /// Returns the socket path as a string
    pub fn local_addr(&self) -> String {
       self.path.display().to_string()
    }
@@ -81,12 +90,14 @@ impl Drop for Listener {
    }
 }
 
+/// Unix domain socket stream implementing async I/O
 #[repr(transparent)]
 pub struct Stream {
    inner: TokioUnixStream,
 }
 
 impl Stream {
+   /// Connects to a Unix domain socket
    pub async fn connect(store_id: &str) -> Result<Self> {
       let path = socket_path(store_id);
       let inner = TokioUnixStream::connect(&path)

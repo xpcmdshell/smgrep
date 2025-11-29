@@ -1,10 +1,13 @@
+//! File synchronization and indexing engine
+
 use std::{
    collections::HashSet,
    path::{Path, PathBuf},
+   sync::Arc,
 };
 
+use futures::stream::{self, StreamExt};
 use indicatif::ProgressBar;
-use rayon::prelude::*;
 
 pub use crate::types::SyncProgress;
 use crate::{
@@ -13,20 +16,25 @@ use crate::{
    config,
    embed::Embedder,
    file::FileSystem,
+   index_lock::IndexLock,
    meta::{FileHash, MetaStore},
    store::Store,
    types::{PreparedChunk, VectorRecord},
 };
 
-fn get_mtime(path: &Path) -> u64 {
-   path
-      .metadata()
-      .and_then(|m| m.modified())
+/// Gets file modification time as Unix seconds
+async fn get_mtime(path: &Path) -> u64 {
+   let Ok(metadata) = tokio::fs::metadata(path).await else {
+      return 0;
+   };
+   metadata
+      .modified()
       .ok()
       .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
       .map_or(0, |d| d.as_secs())
 }
 
+/// Engine for synchronizing files to the index
 pub struct SyncEngine<F: FileSystem, E: Embedder, S: Store> {
    file_system: F,
    chunker:     Chunker,
@@ -34,6 +42,7 @@ pub struct SyncEngine<F: FileSystem, E: Embedder, S: Store> {
    store:       S,
 }
 
+/// Result summary from a sync operation
 #[derive(Debug, Clone)]
 pub struct SyncResult {
    pub processed: usize,
@@ -42,6 +51,7 @@ pub struct SyncResult {
    pub deleted:   usize,
 }
 
+/// Trait for receiving sync progress updates
 pub trait SyncProgressCallback: Send {
    fn progress(&mut self, progress: SyncProgress);
 }
@@ -79,6 +89,7 @@ where
       Self { file_system, chunker, embedder, store }
    }
 
+   /// Performs an initial sync of files to the index
    pub async fn initial_sync(
       &self,
       store_id: &str,
@@ -88,8 +99,22 @@ where
    ) -> Result<SyncResult> {
       const SAVE_INTERVAL: usize = 25;
 
+      let _lock = IndexLock::acquire(store_id)?;
+
       let mut meta_store = MetaStore::load(store_id)?;
+      let model_changed = meta_store.model_mismatch();
       let batch_size = config::get().batch_size();
+
+      if model_changed && !dry_run {
+         self.store.delete_store(store_id).await?;
+         meta_store.reset_for_model_change();
+      }
+
+      // If lance store is empty but meta_store has entries for this root,
+      // clear the stale metadata (data was deleted externally)
+      if !dry_run && self.store.is_empty(store_id).await? {
+         meta_store.delete_by_prefix(root);
+      }
 
       let files = self.file_system.get_files(root)?.collect::<HashSet<_>>();
 
@@ -97,9 +122,11 @@ where
       let mut indexed = 0;
       let mut skipped = 0;
 
-      let meta_paths = meta_store.all_paths().cloned().collect::<HashSet<_>>();
-
-      let deleted_paths = meta_paths.difference(&files).cloned().collect::<Vec<_>>();
+      let deleted_paths: Vec<PathBuf> = meta_store
+         .all_paths()
+         .filter(|p| !files.contains(*p))
+         .cloned()
+         .collect();
 
       if !dry_run && !deleted_paths.is_empty() {
          self.store.delete_files(store_id, &deleted_paths).await?;
@@ -110,46 +137,49 @@ where
 
       let deleted_count = deleted_paths.len();
 
-      let hash_results: Vec<_> = files
-         .into_iter()
-         .filter_map(|file_path| {
-            let current_mtime = get_mtime(&file_path);
+      let scanned = stream::iter(files.into_iter().map(|file_path| async {
+         let current_mtime = get_mtime(&file_path).await;
 
-            if let Some(stored_mtime) = meta_store.get_mtime(&file_path)
-               && stored_mtime == current_mtime
-            {
-               return None;
-            }
+         if let Some(stored_mtime) = meta_store.get_mtime(&file_path)
+            && stored_mtime == current_mtime
+         {
+            return None;
+         }
 
-            let content = std::fs::read(&file_path).ok()?;
-            let hash = FileHash::sum(&content);
+         // TODO: blocking I/O in filter_map - could be improved with async iteration
+         let content = std::fs::read(&file_path).ok()?;
+         let hash = FileHash::sum(&content);
 
-            let existing_hash = meta_store.get_hash(file_path.as_path());
-            let needs_indexing = existing_hash != Some(hash);
+         let existing_hash = meta_store.get_hash(file_path.as_path());
+         let needs_indexing = existing_hash != Some(hash);
+         let has_existing_hash = existing_hash.is_some();
 
-            Some((file_path, hash, content, current_mtime, needs_indexing))
-         })
-         .collect();
+         Some((file_path, hash, content, current_mtime, needs_indexing, has_existing_hash))
+      }))
+      .buffer_unordered(64)
+      .filter_map(|x| async move { x })
+      .collect::<Vec<_>>()
+      .await;
 
-      let changed_files: Vec<PathBuf> = hash_results
-         .iter()
-         .filter_map(|(path, _, _, _, needs_indexing)| {
-            let has_existing_hash = meta_store.get_hash(path).is_some();
-            if *needs_indexing && has_existing_hash {
-               Some(path.clone())
-            } else {
-               None
-            }
-         })
-         .collect();
-
-      if !dry_run && !changed_files.is_empty() {
-         self.store.delete_files(store_id, &changed_files).await?;
+      if !dry_run {
+         let changed_files = scanned
+            .iter()
+            .filter_map(|(file_path, _, _, _, needs_indexing, has_existing_hash)| {
+               if *needs_indexing && *has_existing_hash {
+                  Some(file_path.clone())
+               } else {
+                  None
+               }
+            })
+            .collect::<Vec<_>>();
+         if !changed_files.is_empty() {
+            self.store.delete_files(store_id, &changed_files).await?;
+         }
       }
 
-      let files_to_index: Vec<_> = hash_results
+      let files_to_index: Vec<_> = scanned
          .into_iter()
-         .filter_map(|(path_str, hash, content, mtime, needs_indexing)| {
+         .filter_map(|(path_str, hash, content, mtime, needs_indexing, _)| {
             processed += 1;
             if !needs_indexing {
                skipped += 1;
@@ -163,66 +193,78 @@ where
          })
          .collect();
 
-      let chunked_files: Vec<_> = files_to_index
-         .par_iter()
-         .filter_map(|(path, hash, content, mtime)| {
-            let content_str = Str::from_utf8_lossy(content);
+      let chunked_files: Vec<_> = stream::iter(files_to_index.into_iter())
+         .map(|(path, hash, content, mtime)| {
+            let chunker = self.chunker.clone();
+            async move {
+               let content_str = Str::from_utf8_lossy(&content);
+               let path_arc = Arc::new(path.clone());
 
-            let chunks =
-               futures::executor::block_on(self.chunker.chunk(&content_str, path)).ok()?;
-            let anchor_chunk = create_anchor_chunk(&content_str, path);
-
-            let mut prepared_chunks = Vec::new();
-
-            let anchor_prepared = PreparedChunk {
-               id:           format!("{}:anchor", path.display()),
-               path:         path.clone(),
-               hash:         *hash,
-               content:      anchor_chunk.content.clone(),
-               start_line:   anchor_chunk.start_line as u32,
-               end_line:     anchor_chunk.end_line as u32,
-               chunk_index:  Some(0),
-               is_anchor:    Some(true),
-               chunk_type:   anchor_chunk.chunk_type,
-               context_prev: None,
-               context_next: None,
-            };
-            prepared_chunks.push(anchor_prepared);
-
-            for (idx, chunk) in chunks.iter().enumerate() {
-               let context_prev: Option<Str> = if idx > 0 {
-                  Some(chunks[idx - 1].content.clone())
-               } else {
-                  None
+               let chunks = match chunker.chunk(&content_str, &path).await {
+                  Ok(c) => c,
+                  Err(e) => {
+                     tracing::warn!("Failed to chunk {}: {}", path.display(), e);
+                     return None;
+                  },
                };
+               let anchor_chunk = create_anchor_chunk(&content_str, &path);
 
-               let context_next: Option<Str> = if idx < chunks.len() - 1 {
-                  Some(chunks[idx + 1].content.clone())
-               } else {
-                  None
-               };
+               let mut prepared_chunks = Vec::with_capacity(chunks.len() + 1);
 
-               let prepared = PreparedChunk {
-                  id: format!("{}:{}", path.display(), idx),
-                  path: path.clone(),
-                  hash: *hash,
-                  content: chunk.content.clone(),
-                  start_line: chunk.start_line as u32,
-                  end_line: chunk.end_line as u32,
-                  chunk_index: Some(idx as u32 + 1),
-                  is_anchor: Some(false),
-                  chunk_type: chunk.chunk_type,
-                  context_prev,
-                  context_next,
+               let anchor_prepared = PreparedChunk {
+                  id: format!("{}:anchor", path.display()),
+                  path: Arc::clone(&path_arc),
+                  hash,
+                  content: anchor_chunk.content,
+                  start_line: anchor_chunk.start_line as u32,
+                  end_line: anchor_chunk.end_line as u32,
+                  chunk_index: Some(0),
+                  is_anchor: Some(true),
+                  chunk_type: anchor_chunk.chunk_type,
+                  context_prev: None,
+                  context_next: None,
                };
-               prepared_chunks.push(prepared);
+               prepared_chunks.push(anchor_prepared);
+
+               for (idx, chunk) in chunks.iter().enumerate() {
+                  let context_prev: Option<Str> = if idx > 0 {
+                     Some(chunks[idx - 1].content.clone())
+                  } else {
+                     None
+                  };
+
+                  let context_next: Option<Str> = if idx < chunks.len() - 1 {
+                     Some(chunks[idx + 1].content.clone())
+                  } else {
+                     None
+                  };
+
+                  let prepared = PreparedChunk {
+                     id: format!("{}:{}", path.display(), idx),
+                     path: Arc::clone(&path_arc),
+                     hash,
+                     content: chunk.content.clone(),
+                     start_line: chunk.start_line as u32,
+                     end_line: chunk.end_line as u32,
+                     chunk_index: Some(idx as u32 + 1),
+                     is_anchor: Some(false),
+                     chunk_type: chunk.chunk_type,
+                     context_prev,
+                     context_next,
+                  };
+                  prepared_chunks.push(prepared);
+               }
+
+               Some((path, hash, mtime, prepared_chunks))
             }
-
-            Some((path.clone(), *hash, *mtime, prepared_chunks))
          })
-         .collect();
+         .buffer_unordered(64)
+         .filter_map(|x| async move { x })
+         .collect()
+         .await;
 
-      let mut embed_queue: Vec<(PathBuf, FileHash, u64, Vec<PreparedChunk>)> = Vec::new();
+      let mut embed_queue: Vec<(PathBuf, FileHash, u64, Vec<PreparedChunk>)> =
+         Vec::with_capacity(batch_size);
       let mut since_save = 0;
       let total_to_embed = chunked_files.len();
       let mut embedded = 0;
@@ -314,15 +356,11 @@ where
       batch: Vec<(PathBuf, FileHash, u64, Vec<PreparedChunk>)>,
       meta_store: &mut MetaStore,
    ) -> Result<usize> {
-      let mut all_chunks = Vec::new();
-      let mut file_paths = Vec::new();
-
-      for (path, _hash, _mtime, chunks) in &batch {
-         for chunk in chunks {
-            all_chunks.push(chunk.clone());
-         }
-         file_paths.push(path.clone());
-      }
+      let file_count = batch.len();
+      let all_chunks: Vec<PreparedChunk> = batch
+         .iter()
+         .flat_map(|(_, _, _, chunks)| chunks.iter().cloned())
+         .collect();
 
       if all_chunks.is_empty() {
          return Ok(0);
@@ -359,6 +397,6 @@ where
          meta_store.set_meta(path, hash, mtime);
       }
 
-      Ok(file_paths.len())
+      Ok(file_count)
    }
 }

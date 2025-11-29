@@ -1,3 +1,5 @@
+//! TCP-based socket implementation for non-Unix platforms
+
 use std::{
    fs, io,
    path::PathBuf,
@@ -13,6 +15,7 @@ use tokio::{
 use super::SocketError;
 use crate::{Result, config};
 
+/// Returns the directory where socket port files are stored
 pub fn socket_dir() -> PathBuf {
    config::data_dir().join("socks")
 }
@@ -21,10 +24,12 @@ fn port_file_path(store_id: &str) -> PathBuf {
    socket_dir().join(format!("{}.port", store_id))
 }
 
+/// Returns the port file path for a store ID
 pub fn socket_path(store_id: &str) -> PathBuf {
    port_file_path(store_id)
 }
 
+/// Lists all running servers by checking for port files
 pub fn list_running_servers() -> Vec<String> {
    let dir = socket_dir();
    if !dir.exists() {
@@ -45,10 +50,12 @@ pub fn list_running_servers() -> Vec<String> {
       .collect()
 }
 
+/// Removes the port file for a store ID
 pub fn remove_socket(store_id: &str) {
    let _ = fs::remove_file(port_file_path(store_id));
 }
 
+/// TCP listener that binds to localhost and stores port in a file
 pub struct Listener {
    inner:     TokioTcpListener,
    port_file: PathBuf,
@@ -56,6 +63,7 @@ pub struct Listener {
 }
 
 impl Listener {
+   /// Binds to a random port on localhost and creates a port file
    pub async fn bind(store_id: &str) -> Result<Self> {
       let port_file = port_file_path(store_id);
 
@@ -81,11 +89,13 @@ impl Listener {
       Ok(Self { inner, port_file, port })
    }
 
+   /// Accepts an incoming connection
    pub async fn accept(&self) -> Result<Stream> {
       let (stream, _) = self.inner.accept().await.map_err(SocketError::Accept)?;
       Ok(Stream { inner: stream })
    }
 
+   /// Returns the local address and port as a string
    pub fn local_addr(&self) -> String {
       format!("127.0.0.1:{}", self.port)
    }
@@ -97,12 +107,14 @@ impl Drop for Listener {
    }
 }
 
+/// TCP stream wrapper implementing async I/O
 #[repr(transparent)]
 pub struct Stream {
    inner: TokioTcpStream,
 }
 
 impl Stream {
+   /// Connects to a server by reading its port from the port file
    pub async fn connect(store_id: &str) -> Result<Self> {
       let port_file = port_file_path(store_id);
 

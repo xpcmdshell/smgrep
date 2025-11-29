@@ -12,22 +12,30 @@
 pub mod json;
 pub mod text;
 
-use std::path::Path;
+use std::{borrow::Cow, path::Path};
 
 use crate::types::SearchResult;
 
+/// Output format mode for search results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
+   /// Rich TTY output with syntax highlighting and colors
    Human,
+   /// Compact pipe-friendly output for LLMs
    Agent,
+   /// File paths only (like `grep -l`)
    Compact,
+   /// Machine-readable JSON output
    Json,
 }
 
+/// Formats search results for display.
 pub trait Formatter {
+   /// Formats search results into a string representation.
    fn format(&self, results: &[SearchResult], show_scores: bool, show_content: bool) -> String;
 }
 
+/// Creates a formatter instance for the specified output mode.
 pub fn create_formatter(mode: OutputMode) -> Box<dyn Formatter> {
    match mode {
       OutputMode::Human => Box::new(text::HumanFormatter::new()),
@@ -37,6 +45,10 @@ pub fn create_formatter(mode: OutputMode) -> Box<dyn Formatter> {
    }
 }
 
+/// Detects the appropriate output mode based on flags and terminal detection.
+///
+/// Selects JSON if `json` is true, Compact if `compact` is true, Human if
+/// stdout is a TTY, otherwise Agent.
 pub fn detect_output_mode(json: bool, compact: bool) -> OutputMode {
    if json {
       OutputMode::Json
@@ -49,6 +61,22 @@ pub fn detect_output_mode(json: bool, compact: bool) -> OutputMode {
    }
 }
 
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+   if needle.is_empty() {
+      return true;
+   }
+   let needle_bytes = needle.as_bytes();
+   haystack
+      .as_bytes()
+      .windows(needle_bytes.len())
+      .any(|window| window.eq_ignore_ascii_case(needle_bytes))
+}
+
+/// Extracts semantic tags from a search result based on chunk type and file
+/// path.
+///
+/// Returns tags like "Definition", "Test", or "Anchor" that describe the nature
+/// of the result.
 pub fn get_semantic_tags(result: &SearchResult) -> Vec<&'static str> {
    use crate::types::ChunkType;
    let mut tags = Vec::new();
@@ -60,8 +88,9 @@ pub fn get_semantic_tags(result: &SearchResult) -> Vec<&'static str> {
       tags.push("Definition");
    }
 
-   let path_str = result.path.to_string_lossy().to_lowercase();
-   if path_str.contains("test") || path_str.contains("spec") {
+   let path_str = result.path.to_string_lossy();
+   if contains_ignore_ascii_case(&path_str, "test") || contains_ignore_ascii_case(&path_str, "spec")
+   {
       tags.push("Test");
    }
 
@@ -72,14 +101,17 @@ pub fn get_semantic_tags(result: &SearchResult) -> Vec<&'static str> {
    tags
 }
 
-pub fn truncate_line(line: &str, max_len: usize) -> String {
+/// Truncates a line to a maximum length, appending "..." if truncated.
+pub fn truncate_line(line: &str, max_len: usize) -> Cow<'_, str> {
    if line.len() <= max_len {
-      line.to_string()
+      Cow::Borrowed(line)
    } else {
-      format!("{}...", &line[..max_len])
+      Cow::Owned(format!("{}...", &line[..max_len]))
    }
 }
 
+/// Detects the programming language from a file extension for syntax
+/// highlighting.
 pub fn detect_language(path: &Path) -> Option<&'static str> {
    path
       .extension()
@@ -114,27 +146,24 @@ pub fn detect_language(path: &Path) -> Option<&'static str> {
       })
 }
 
+/// Formats chunk text with contextual header information.
+///
+/// Constructs a header from file path and context breadcrumbs, then appends the
+/// content.
 pub fn format_chunk_text(context: &[String], file_path: &str, content: &str) -> String {
-   let mut breadcrumb = context.to_vec();
-   let file_label = format!(
-      "File: {}",
-      if file_path.is_empty() {
-         "unknown"
-      } else {
-         file_path
-      }
-   );
-
-   let has_file_label = breadcrumb.iter().any(|entry| entry.starts_with("File: "));
-
-   if !has_file_label {
-      breadcrumb.insert(0, file_label.clone());
-   }
-
-   let header = if breadcrumb.is_empty() {
-      file_label
+   let file_label = if file_path.is_empty() {
+      "unknown"
    } else {
-      breadcrumb.join(" > ")
+      file_path
+   };
+   let has_file_label = context.iter().any(|entry| entry.starts_with("File: "));
+
+   let header = if context.is_empty() {
+      format!("File: {file_label}")
+   } else if has_file_label {
+      context.join(" > ")
+   } else {
+      format!("File: {file_label} > {}", context.join(" > "))
    };
 
    format!("{header}\n---\n{content}")

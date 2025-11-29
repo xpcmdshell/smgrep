@@ -88,10 +88,6 @@ pub enum Error {
    #[error("claude command exited with code {0}")]
    ClaudeCommand(i32),
 
-   /// File system operation failed on a specific path.
-   #[error("file system error: {op} '{path}': {reason}")]
-   FileSystem { op: &'static str, path: PathBuf, reason: String },
-
    /// Unknown MCP (Model Context Protocol) method was requested.
    #[error("mcp unknown method: {0}")]
    McpUnknownMethod(String),
@@ -248,4 +244,5 @@ impl From<notify::Error> for Error {
    }
 }
 
+/// Standard result type using [`enum@Error`] as the default error type
 pub type Result<T, E = Error> = std::result::Result<T, E>;

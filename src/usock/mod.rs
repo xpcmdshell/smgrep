@@ -1,3 +1,6 @@
+//! Unix domain socket and TCP socket abstractions for IPC
+
+/// Errors that can occur during socket operations
 #[derive(Debug, thiserror::Error)]
 pub enum SocketError {
    #[error("server already running")]
