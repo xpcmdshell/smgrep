@@ -1,7 +1,11 @@
+//! Model Context Protocol (MCP) server implementation.
+//!
+//! Implements the MCP JSON-RPC protocol to expose smgrep's semantic search
+//! capabilities as a tool that can be used by Claude and other MCP clients.
+
 use std::{
    io::Write,
    path::{Path, PathBuf},
-   process::{Command, Stdio},
 };
 
 use serde::{Deserialize, Serialize};
@@ -10,12 +14,14 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::{
    Result,
+   cmd::daemon,
    error::Error,
    git,
    ipc::{Request, Response, SocketBuffer},
    usock,
 };
 
+/// Incoming JSON-RPC 2.0 request from an MCP client.
 #[derive(Deserialize)]
 struct JsonRpcRequest {
    #[allow(dead_code, reason = "jsonrpc field is required by JSON-RPC spec but not used in code")]
@@ -26,6 +32,7 @@ struct JsonRpcRequest {
    params:  Value,
 }
 
+/// Outgoing JSON-RPC 2.0 response to an MCP client.
 #[derive(Debug, Serialize)]
 struct JsonRpcResponse {
    jsonrpc: &'static str,
@@ -36,6 +43,7 @@ struct JsonRpcResponse {
    error:   Option<JsonRpcError>,
 }
 
+/// JSON-RPC error object.
 #[derive(Debug, Serialize)]
 struct JsonRpcError {
    code:    i32,
@@ -52,6 +60,7 @@ impl JsonRpcResponse {
    }
 }
 
+/// Connection to a smgrep daemon for executing searches.
 struct DaemonConn {
    stream: usock::Stream,
    buffer: SocketBuffer,
@@ -61,14 +70,7 @@ struct DaemonConn {
 impl DaemonConn {
    async fn connect(cwd: PathBuf) -> Result<Self> {
       let store_id = git::resolve_store_id(&cwd)?;
-
-      let stream = if let Ok(s) = usock::Stream::connect(&store_id).await {
-         s
-      } else {
-         spawn_daemon(&cwd)?;
-         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-         usock::Stream::connect(&store_id).await?
-      };
+      let stream = daemon::connect_matching_daemon(&cwd, &store_id).await?;
 
       Ok(Self { stream, buffer: SocketBuffer::new(), cwd })
    }
@@ -106,6 +108,8 @@ impl DaemonConn {
    }
 }
 
+/// Executes the MCP server, reading JSON-RPC requests from stdin and writing
+/// responses to stdout.
 pub async fn execute() -> Result<()> {
    let stdin = BufReader::new(tokio::io::stdin());
    let mut lines = stdin.lines();
@@ -140,6 +144,7 @@ pub async fn execute() -> Result<()> {
    Ok(())
 }
 
+/// Writes a JSON-RPC response to stdout.
 fn write_response(response: &JsonRpcResponse) -> Result<()> {
    let stdout = std::io::stdout();
    let mut stdout = stdout.lock();
@@ -149,6 +154,7 @@ fn write_response(response: &JsonRpcResponse) -> Result<()> {
    Ok(())
 }
 
+/// Handles an incoming JSON-RPC request and returns the result value.
 async fn handle_request(
    request: JsonRpcRequest,
    cwd: &Path,
@@ -223,36 +229,34 @@ async fn handle_request(
    }
 }
 
+/// Executes a search with automatic retry on connection failure.
 async fn do_search_with_retry(
    cwd: PathBuf,
    conn: &mut Option<DaemonConn>,
    query: &str,
    limit: usize,
 ) -> Result<String> {
-   // Ensure connection exists
-   if conn.is_none() {
-      *conn = Some(DaemonConn::connect(cwd.clone()).await?);
-   }
+   let result = {
+      let conn_ref = ensure_conn(&cwd, conn).await?;
+      conn_ref.search(query, limit).await
+   };
 
-   // Try search, reconnect on failure
-   if let Ok(result) = conn.as_mut().unwrap().search(query, limit).await {
-      Ok(result)
+   if let Ok(res) = result {
+      Ok(res)
    } else {
-      // Connection failed, reconnect and retry once
-      *conn = Some(DaemonConn::connect(cwd).await?);
-      conn.as_mut().unwrap().search(query, limit).await
+      *conn = Some(DaemonConn::connect(cwd.clone()).await?);
+      let conn_ref = ensure_conn(&cwd, conn).await?;
+      conn_ref.search(query, limit).await
    }
 }
 
-fn spawn_daemon(path: &Path) -> Result<()> {
-   let exe = std::env::current_exe()?;
-   Command::new(&exe)
-      .arg("serve")
-      .arg("--path")
-      .arg(path)
-      .stdin(Stdio::null())
-      .stdout(Stdio::null())
-      .stderr(Stdio::null())
-      .spawn()?;
-   Ok(())
+/// Ensures a daemon connection exists, creating one if necessary.
+async fn ensure_conn<'a>(
+   cwd: &Path,
+   conn: &'a mut Option<DaemonConn>,
+) -> Result<&'a mut DaemonConn> {
+   if conn.is_none() {
+      *conn = Some(DaemonConn::connect(cwd.to_path_buf()).await?);
+   }
+   Ok(conn.as_mut().expect("connection initialized"))
 }

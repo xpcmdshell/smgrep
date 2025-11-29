@@ -1,3 +1,7 @@
+//! Server status command.
+//!
+//! Displays the status of all running smgrep daemon servers.
+
 use console::style;
 
 use crate::{
@@ -6,6 +10,7 @@ use crate::{
    usock,
 };
 
+/// Executes the status command to show running servers.
 pub async fn execute() -> Result<()> {
    let servers = usock::list_running_servers();
 

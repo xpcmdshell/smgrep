@@ -1,3 +1,7 @@
+//! Stop all servers command.
+//!
+//! Gracefully shuts down all running smgrep daemon servers.
+
 use console::style;
 
 use crate::{
@@ -6,6 +10,7 @@ use crate::{
    usock,
 };
 
+/// Executes the stop-all command to shut down all running servers.
 pub async fn execute() -> Result<()> {
    let servers = usock::list_running_servers();
 

@@ -1,3 +1,8 @@
+//! Index creation and management command.
+//!
+//! Scans source files, chunks them, computes embeddings, and stores them in the
+//! vector database. Supports dry-run mode and index reset operations.
+
 use std::{
    path::{Path, PathBuf},
    sync::Arc,
@@ -13,11 +18,13 @@ use crate::{
    embed::{Embedder, candle::CandleEmbedder},
    file::LocalFileSystem,
    git,
+   index_lock::IndexLock,
    meta::MetaStore,
    store::{LanceStore, Store},
    sync::{SyncEngine, SyncProgressCallback},
 };
 
+/// Executes the index command to create or update a code index.
 pub async fn execute(
    path: Option<PathBuf>,
    dry_run: bool,
@@ -79,7 +86,10 @@ pub async fn execute(
    Ok(())
 }
 
+/// Deletes an existing store and its associated metadata.
 async fn delete_store(store_id: &str, index_path: &Path) -> Result<()> {
+   let _lock = IndexLock::acquire(store_id)?;
+
    let store = LanceStore::new()?;
 
    store.delete_store(store_id).await?;
@@ -91,6 +101,7 @@ async fn delete_store(store_id: &str, index_path: &Path) -> Result<()> {
    Ok(())
 }
 
+/// Scans the directory tree and counts indexable source files.
 fn scan_files(path: &Path) -> usize {
    let mut count = 0;
    if path.is_dir() {
@@ -112,12 +123,14 @@ fn scan_files(path: &Path) -> usize {
    count
 }
 
+/// Result of an indexing operation.
 #[derive(Debug)]
 struct IndexResult {
    indexed:      usize,
    total_chunks: usize,
 }
 
+/// Performs the actual file indexing using the sync engine.
 async fn index_files(
    path: &Path,
    store_id: &str,
@@ -133,5 +146,5 @@ async fn index_files(
       .initial_sync(store_id, path, false, callback)
       .await?;
 
-   Ok(IndexResult { indexed: result.indexed, total_chunks: 0 })
+   Ok(IndexResult { indexed: result.indexed, total_chunks: result.indexed })
 }

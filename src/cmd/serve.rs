@@ -1,3 +1,9 @@
+//! Long-running daemon server command.
+//!
+//! Starts a background server that maintains an index, watches for file
+//! changes, and responds to search requests over Unix domain sockets.
+//! Automatically shuts down after a period of inactivity.
+
 use std::{
    path::{Path, PathBuf},
    sync::{
@@ -8,6 +14,7 @@ use std::{
 };
 
 use console::style;
+use futures::stream::{self, StreamExt};
 use parking_lot::Mutex;
 use tokio::{signal, sync::watch, time};
 
@@ -18,13 +25,15 @@ use crate::{
    embed::{Embedder, candle::CandleEmbedder},
    file::{FileSystem, FileWatcher, IgnorePatterns, LocalFileSystem, WatchAction},
    git,
+   index_lock::IndexLock,
    ipc::{self, Request, Response, ServerStatus},
    meta::{FileHash, MetaStore},
    store::{LanceStore, SearchParams, Store},
    types::{PreparedChunk, SearchResponse, SearchResult, SearchStatus, VectorRecord},
-   usock,
+   usock, version,
 };
 
+/// The main server state managing indexing, search, and file watching.
 struct Server {
    store:         Arc<dyn Store>,
    embedder:      Arc<dyn Embedder>,
@@ -36,6 +45,7 @@ struct Server {
    progress:      AtomicU8,
    launch_time:   Instant,
    last_activity: AtomicU64,
+   shutdown:      watch::Sender<bool>,
 }
 
 impl Server {
@@ -57,6 +67,7 @@ impl Server {
    }
 }
 
+/// Executes the serve command, starting a long-running daemon server.
 pub async fn execute(path: Option<PathBuf>, store_id: Option<String>) -> Result<()> {
    let root = std::env::current_dir()?;
    let serve_path = path.unwrap_or_else(|| root.clone());
@@ -85,8 +96,19 @@ pub async fn execute(path: Option<PathBuf>, store_id: Option<String>) -> Result<
       time::sleep(Duration::from_millis(500)).await;
    }
 
-   let meta_store = MetaStore::load(&resolved_store_id)?;
+   let mut meta_store = MetaStore::load(&resolved_store_id)?;
+   let model_changed = meta_store.model_mismatch();
+
+   if model_changed {
+      store.delete_store(&resolved_store_id).await?;
+      meta_store.reset_for_model_change();
+      meta_store.save()?;
+   }
+
    let is_empty = store.is_empty(&resolved_store_id).await?;
+   let needs_initial_index = is_empty || model_changed;
+
+   let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
    let server = Arc::new(Server {
       store,
@@ -95,14 +117,21 @@ pub async fn execute(path: Option<PathBuf>, store_id: Option<String>) -> Result<
       meta_store: Mutex::new(meta_store),
       store_id: resolved_store_id,
       root: serve_path,
-      indexing: AtomicBool::new(is_empty),
+      indexing: AtomicBool::new(needs_initial_index),
       progress: AtomicU8::new(0),
       last_activity: AtomicU64::new(0),
       launch_time: Instant::now(),
+      shutdown: shutdown_tx.clone(),
    });
 
-   if is_empty {
-      println!("{}", style("Store empty, performing initial index...").yellow());
+   if needs_initial_index {
+      let reason = if model_changed {
+         "Embedding models changed; rebuilding index..."
+      } else {
+         "Store empty, performing initial index..."
+      };
+
+      println!("{}", style(reason).yellow());
       let server_clone = Arc::clone(&server);
       tokio::spawn(async move {
          if let Err(e) = server_clone.initial_sync().await {
@@ -112,8 +141,6 @@ pub async fn execute(path: Option<PathBuf>, store_id: Option<String>) -> Result<
    }
 
    let _watcher = server.start_watcher()?;
-
-   let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
    let idle_server = Arc::clone(&server);
    let idle_shutdown = shutdown_tx.clone();
@@ -186,6 +213,7 @@ impl Server {
       self.touch();
 
       let mut buffer = ipc::SocketBuffer::new();
+      let mut shutting_down = false;
 
       loop {
          let request: Request = match buffer.recv(&mut stream).await {
@@ -202,6 +230,7 @@ impl Server {
          self.touch();
 
          let response = match request {
+            Request::Hello { .. } => Response::Hello { git_hash: version::GIT_HASH.to_string() },
             Request::Search { query, limit, path, rerank } => {
                self.handle_search(query, limit, path, rerank).await
             },
@@ -213,15 +242,18 @@ impl Server {
                },
             },
             Request::Shutdown => {
-               let _ = buffer
-                  .send(&mut stream, &Response::Shutdown { success: true })
-                  .await;
-               std::process::exit(0);
+               shutting_down = true;
+               Response::Shutdown { success: true }
             },
          };
 
          if let Err(e) = buffer.send(&mut stream, &response).await {
             tracing::debug!("Client write error: {}", e);
+            break;
+         }
+
+         if shutting_down {
+            let _ = self.shutdown.send(true);
             break;
          }
       }
@@ -309,21 +341,40 @@ impl Server {
       }
    }
 
-   async fn initial_sync(&self) -> Result<()> {
+   async fn initial_sync(self: &Arc<Self>) -> Result<()> {
+      let _lock = IndexLock::acquire(&self.store_id)?;
+
       let fs = LocalFileSystem::new();
       let files: Vec<PathBuf> = fs.get_files(&self.root)?.collect();
 
       let total = files.len();
-      let mut indexed = 0;
+      if total == 0 {
+         self.indexing.store(false, Ordering::Relaxed);
+         self.progress.store(100, Ordering::Relaxed);
+         tracing::info!("Initial sync complete: 0/0 files indexed");
+         return Ok(());
+      }
 
-      for (i, file_path) in files.iter().enumerate() {
-         if let Err(e) = self.process_file(file_path).await {
-            tracing::warn!("Failed to index {}: {}", file_path.display(), e);
-         } else {
-            indexed += 1;
+      let results: Vec<_> = stream::iter(files.into_iter().enumerate())
+         .map(|(i, file_path)| {
+            let server = Arc::clone(self);
+            async move {
+               let result = server.process_file(&file_path).await;
+               (i, file_path, result)
+            }
+         })
+         .buffer_unordered(8)
+         .collect()
+         .await;
+
+      let mut indexed = 0;
+      for (completed, (_i, file_path, result)) in results.into_iter().enumerate() {
+         match result {
+            Ok(()) => indexed += 1,
+            Err(e) => tracing::warn!("Failed to index {}: {}", file_path.display(), e),
          }
 
-         let pct = ((i + 1) * 100 / total).min(100) as u8;
+         let pct = ((completed + 1) * 100 / total).min(100) as u8;
          self.progress.store(pct, Ordering::Relaxed);
       }
 
@@ -358,21 +409,34 @@ impl Server {
          return Ok(());
       }
 
+      let path_arc = std::sync::Arc::new(file_path.to_path_buf());
       let prepared: Vec<PreparedChunk> = chunks
-         .into_iter()
+         .iter()
          .enumerate()
-         .map(|(i, chunk)| PreparedChunk {
-            id: format!("{}:{}", file_path.display(), i),
-            path: file_path.to_path_buf(),
-            hash,
-            content: chunk.content.clone(),
-            start_line: chunk.start_line as u32,
-            end_line: chunk.end_line as u32,
-            chunk_index: Some(i as u32),
-            is_anchor: chunk.is_anchor,
-            chunk_type: chunk.chunk_type,
-            context_prev: chunk.context.first().cloned(),
-            context_next: chunk.context.last().cloned(),
+         .map(|(i, chunk)| {
+            let context_prev = if i > 0 {
+               Some(chunks[i - 1].content.clone())
+            } else {
+               None
+            };
+            let context_next = if i < chunks.len() - 1 {
+               Some(chunks[i + 1].content.clone())
+            } else {
+               None
+            };
+            PreparedChunk {
+               id: format!("{}:{}", file_path.display(), i),
+               path: std::sync::Arc::clone(&path_arc),
+               hash,
+               content: chunk.content.clone(),
+               start_line: chunk.start_line as u32,
+               end_line: chunk.end_line as u32,
+               chunk_index: Some(i as u32),
+               is_anchor: chunk.is_anchor,
+               chunk_type: chunk.chunk_type,
+               context_prev,
+               context_next,
+            }
          })
          .collect();
 
@@ -405,8 +469,8 @@ impl Server {
       {
          let mut meta = self.meta_store.lock();
          meta.set_hash(file_path, hash);
-         meta.save()?;
       }
+      self.meta_store.lock().save()?;
 
       Ok(())
    }
@@ -417,23 +481,52 @@ impl Server {
       let watcher = FileWatcher::new(self.root.clone(), ignore_patterns, move |changes| {
          let server = Arc::clone(&server);
          tokio::spawn(async move {
-            for (path, action) in changes {
-               match action {
-                  WatchAction::Delete => {
-                     if let Err(e) = server.store.delete_file(&server.store_id, &path).await {
-                        tracing::error!("Failed to delete file from store: {}", e);
-                     }
-                     let mut meta = server.meta_store.lock();
-                     meta.remove(&path);
-                     if let Err(e) = meta.save() {
-                        tracing::error!("Failed to save meta after delete: {}", e);
-                     }
-                  },
-                  WatchAction::Upsert => {
-                     if let Err(e) = server.process_file(&path).await {
-                        tracing::error!("Failed to process changed file: {}", e);
-                     }
-                  },
+            let _lock = match IndexLock::acquire(&server.store_id) {
+               Ok(lock) => lock,
+               Err(e) => {
+                  tracing::error!("Failed to acquire index lock: {e}");
+                  return;
+               },
+            };
+
+            let results: Vec<_> = stream::iter(changes)
+               .map(|(path, action)| {
+                  let server = Arc::clone(&server);
+                  async move {
+                     let result = match action {
+                        WatchAction::Delete => {
+                           if let Err(e) = server.store.delete_file(&server.store_id, &path).await {
+                              tracing::error!("Failed to delete file from store: {}", e);
+                           }
+                           {
+                              let mut meta = server.meta_store.lock();
+                              meta.remove(&path);
+                           }
+                           let value = server.meta_store.lock().save();
+                           if let Err(e) = value {
+                              tracing::error!("Failed to save meta after delete: {}", e);
+                           }
+                           Ok(())
+                        },
+                        WatchAction::Upsert => server.process_file(&path).await,
+                     };
+                     (path, action, result)
+                  }
+               })
+               .buffer_unordered(8)
+               .collect()
+               .await;
+
+            for (path, action, result) in results {
+               if let Err(e) = result {
+                  match action {
+                     WatchAction::Delete => {
+                        tracing::error!("Failed to handle delete for {}: {}", path.display(), e);
+                     },
+                     WatchAction::Upsert => {
+                        tracing::error!("Failed to process changed file {}: {}", path.display(), e);
+                     },
+                  }
                }
             }
          });

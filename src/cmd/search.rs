@@ -1,6 +1,11 @@
+//! Semantic search command.
+//!
+//! Performs semantic code search using vector similarity, with support for
+//! daemon-based or direct execution, JSON output, and various formatting
+//! options.
+
 use std::{
    path::{Path, PathBuf},
-   process::{Command, Stdio},
    sync::Arc,
    time::Duration,
 };
@@ -13,6 +18,7 @@ use tokio::time;
 use crate::{
    Result,
    chunker::Chunker,
+   cmd::daemon,
    embed::worker::EmbedWorker,
    error::Error,
    file::LocalFileSystem,
@@ -24,6 +30,7 @@ use crate::{
    usock,
 };
 
+/// A single search result with metadata and content.
 #[derive(Debug, Serialize, Deserialize)]
 struct SearchResult {
    path:       PathBuf,
@@ -39,11 +46,13 @@ struct SearchResult {
    is_anchor:  Option<bool>,
 }
 
+/// JSON output format for search results.
 #[derive(Debug, Serialize)]
 struct JsonOutput {
    results: Vec<SearchResult>,
 }
 
+/// Command-line options for search behavior.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct SearchOptions {
    pub content:   bool,
@@ -56,6 +65,7 @@ pub struct SearchOptions {
    pub plain:     bool,
 }
 
+/// Options for formatting search results in human-readable output.
 #[derive(Default, Debug, Clone, Copy)]
 struct FormatOptions {
    content: bool,
@@ -64,6 +74,7 @@ struct FormatOptions {
    plain:   bool,
 }
 
+/// Executes a semantic code search.
 pub async fn execute(
    query: String,
    path: Option<PathBuf>,
@@ -151,6 +162,8 @@ pub async fn execute(
    Ok(())
 }
 
+/// Attempts to execute the search via a running daemon, returning None if
+/// unavailable.
 async fn try_daemon_search(
    query: &str,
    max: usize,
@@ -158,18 +171,7 @@ async fn try_daemon_search(
    path: &Path,
    store_id: &str,
 ) -> Result<Option<Vec<SearchResult>>> {
-   let Ok(stream) = usock::Stream::connect(store_id).await else {
-      spawn_daemon(path)?;
-
-      for _ in 0..50 {
-         time::sleep(Duration::from_millis(100)).await;
-         if let Ok(s) = usock::Stream::connect(store_id).await {
-            return send_search_request(s, query, max, rerank, path)
-               .await
-               .map(Some);
-         }
-      }
-
+   let Ok(stream) = daemon::connect_matching_daemon(path, store_id).await else {
       return Ok(None);
    };
 
@@ -178,6 +180,8 @@ async fn try_daemon_search(
       .map(Some)
 }
 
+/// Sends a search request to a daemon over the given stream and returns
+/// results.
 async fn send_search_request(
    mut stream: usock::Stream,
    query: &str,
@@ -205,7 +209,7 @@ async fn send_search_request(
                path:       r.path,
                score:      r.score,
                content:    r.content.into_string(),
-               chunk_type: r.chunk_type.map(|ct| format!("{ct:?}").to_lowercase()),
+               chunk_type: r.chunk_type.map(|ct| ct.as_lowercase_str().to_string()),
                start_line: Some(r.start_line as usize),
                end_line:   Some((r.start_line + r.num_lines) as usize),
                is_anchor:  r.is_anchor,
@@ -218,22 +222,8 @@ async fn send_search_request(
    }
 }
 
-fn spawn_daemon(path: &Path) -> Result<()> {
-   let exe = std::env::current_exe()?;
-
-   Command::new(&exe)
-      .arg("serve")
-      .arg("--path")
-      .arg(path)
-      .stdin(Stdio::null())
-      .stdout(Stdio::null())
-      .stderr(Stdio::null())
-      .spawn()
-      .map_err(Error::DaemonSpawn)?;
-
-   Ok(())
-}
-
+/// Performs a search directly without using a daemon, loading the search engine
+/// in-process.
 async fn perform_search(
    query: &str,
    path: &Path,
@@ -245,9 +235,9 @@ async fn perform_search(
    let store = Arc::new(LanceStore::new()?);
    let embedder = Arc::new(EmbedWorker::new()?);
 
-   let fs = LocalFileSystem::new();
+   let file_system = LocalFileSystem::new();
    let chunker = Chunker::default();
-   let sync_engine = SyncEngine::new(fs, chunker, embedder.clone(), store.clone());
+   let sync_engine = SyncEngine::new(file_system, chunker, embedder.clone(), store.clone());
 
    sync_engine
       .initial_sync(store_id, path, false, &mut ())
@@ -258,7 +248,7 @@ async fn perform_search(
       .search(store_id, query, max, per_file, None, rerank)
       .await?;
 
-   let root_str = path.to_string_lossy().to_string();
+   let root_str = path.to_string_lossy().into_owned();
 
    let results = response
       .results
@@ -276,7 +266,7 @@ async fn perform_search(
             path:       rel_path,
             score:      r.score,
             content:    r.content.into_string(),
-            chunk_type: Some(format!("{:?}", r.chunk_type).to_lowercase()),
+            chunk_type: r.chunk_type.map(|ct| ct.as_lowercase_str().to_string()),
             start_line: Some(r.start_line as usize),
             end_line:   Some((r.start_line + r.num_lines) as usize),
             is_anchor:  r.is_anchor,
@@ -287,6 +277,7 @@ async fn perform_search(
    Ok(results)
 }
 
+/// Formats and prints search results in human-readable form.
 fn format_results(results: &[SearchResult], query: &str, root: &Path, options: FormatOptions) {
    const MAX_PREVIEW_LINES: usize = 12;
 

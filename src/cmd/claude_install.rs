@@ -1,3 +1,8 @@
+//! Claude Code plugin installation command.
+//!
+//! Installs the smgrep plugin for Claude Code by extracting the bundled plugin
+//! files and registering them with the Claude CLI.
+
 use std::{
    fs,
    io::Cursor,
@@ -9,8 +14,10 @@ use console::style;
 
 use crate::{Result, config, error::Error};
 
+/// Embedded plugin bundle containing all plugin files.
 const PLUGIN_BUNDLE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/plugin-bundle.tar"));
 
+/// Extracts the embedded plugin bundle to the specified destination directory.
 fn extract_plugin_bundle(dest: &PathBuf) -> Result<()> {
    fs::create_dir_all(dest)?;
    let mut archive = tar::Archive::new(Cursor::new(PLUGIN_BUNDLE));
@@ -18,6 +25,7 @@ fn extract_plugin_bundle(dest: &PathBuf) -> Result<()> {
    Ok(())
 }
 
+/// Runs a Claude CLI command with the given arguments.
 fn run_claude_command(args: &[&str]) -> Result<()> {
    let status = Command::new("claude")
       .args(args)
@@ -34,6 +42,7 @@ fn run_claude_command(args: &[&str]) -> Result<()> {
    Ok(())
 }
 
+/// Executes the Claude Code plugin installation command.
 pub fn execute() -> Result<()> {
    println!(
       "{}",
@@ -80,6 +89,7 @@ pub fn execute() -> Result<()> {
    Ok(())
 }
 
+/// Prints troubleshooting information when installation fails.
 fn print_troubleshooting() {
    eprintln!();
    eprintln!("{}", style("Troubleshooting:").yellow().bold());

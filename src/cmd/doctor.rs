@@ -1,12 +1,19 @@
-use std::{fs, path::Path};
+//! System health check command.
+//!
+//! Verifies that all required components are present and properly configured,
+//! including models, grammars, and data directories.
+
+use std::path::Path;
 
 use console::style;
 
 use crate::{
    Result, config,
    grammar::{GRAMMAR_URLS, GrammarManager},
+   util::{format_size, get_dir_size},
 };
 
+/// Executes the doctor command to check system health.
 pub fn execute() -> Result<()> {
    println!("{}\n", style("smgrep Doctor").bold());
 
@@ -15,7 +22,7 @@ pub fn execute() -> Result<()> {
    let data = config::data_dir();
    let grammars = config::grammar_dir();
 
-   check_dir("Root", &root);
+   check_dir("Root", root);
    check_dir("Models", models);
    check_dir("Data (Vector DB)", data);
    check_dir("Grammars", grammars);
@@ -125,6 +132,7 @@ pub fn execute() -> Result<()> {
    Ok(())
 }
 
+/// Checks if a directory exists and prints its status.
 fn check_dir(name: &str, path: &Path) {
    let exists = path.exists();
    let symbol = if exists {
@@ -133,39 +141,4 @@ fn check_dir(name: &str, path: &Path) {
       style("✗").red()
    };
    println!("{} {}: {}", symbol, name, style(path.display()).dim());
-}
-
-fn get_dir_size(path: &Path) -> Result<u64> {
-   let mut total = 0u64;
-
-   if path.is_dir() {
-      for entry in fs::read_dir(path)? {
-         let entry = entry?;
-         let metadata = entry.metadata()?;
-
-         if metadata.is_dir() {
-            total += get_dir_size(&entry.path())?;
-         } else {
-            total += metadata.len();
-         }
-      }
-   }
-
-   Ok(total)
-}
-
-fn format_size(bytes: u64) -> String {
-   const KB: u64 = 1024;
-   const MB: u64 = KB * 1024;
-   const GB: u64 = MB * 1024;
-
-   if bytes < KB {
-      format!("{bytes} B")
-   } else if bytes < MB {
-      format!("{:.1} KB", bytes as f64 / KB as f64)
-   } else if bytes < GB {
-      format!("{:.1} MB", bytes as f64 / MB as f64)
-   } else {
-      format!("{:.1} GB", bytes as f64 / GB as f64)
-   }
 }

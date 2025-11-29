@@ -1,3 +1,8 @@
+//! Initial setup command.
+//!
+//! Downloads required models and grammars, creating necessary directories
+//! for first-time use of smgrep.
+
 use std::{
    fs,
    path::{Path, PathBuf},
@@ -12,6 +17,7 @@ use crate::{
    grammar::{GRAMMAR_URLS, GrammarManager},
 };
 
+/// Executes the setup command to download models and grammars.
 pub async fn execute() -> Result<()> {
    println!("{}\n", style("smgrep Setup").bold());
 
@@ -49,6 +55,7 @@ pub async fn execute() -> Result<()> {
    Ok(())
 }
 
+/// Checks if a directory exists and prints its status.
 fn check_dir(name: &str, path: &Path) {
    let exists = path.exists();
    let symbol = if exists {
@@ -59,6 +66,7 @@ fn check_dir(name: &str, path: &Path) {
    println!("{} {}: {}", symbol, name, style(path.display()).dim());
 }
 
+/// Downloads embedding models from Hugging Face.
 async fn download_models(models_dir: &Path) -> Result<()> {
    let cfg = config::get();
    let models = [&cfg.dense_model, &cfg.colbert_model];
@@ -101,6 +109,7 @@ async fn download_models(models_dir: &Path) -> Result<()> {
    Ok(())
 }
 
+/// Downloads tree-sitter grammar files for supported languages.
 async fn download_grammars(grammars_dir: &Path) -> Result<()> {
    let grammar_manager = GrammarManager::with_auto_download(false)?;
 
@@ -138,6 +147,8 @@ async fn download_grammars(grammars_dir: &Path) -> Result<()> {
    Ok(())
 }
 
+/// Downloads a specific model from Hugging Face Hub to the destination
+/// directory.
 async fn download_model_from_hf(model_id: &str, dest: &PathBuf) -> Result<()> {
    fs::create_dir_all(dest)?;
 

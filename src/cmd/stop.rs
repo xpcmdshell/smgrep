@@ -1,3 +1,7 @@
+//! Stop server command.
+//!
+//! Gracefully shuts down a running daemon server for the current project.
+
 use std::{env, path::PathBuf};
 
 use console::style;
@@ -8,6 +12,7 @@ use crate::{
    usock,
 };
 
+/// Executes the stop command to shut down a server.
 pub async fn execute(path: Option<PathBuf>) -> Result<()> {
    let root = env::current_dir()?;
    let target_path = path.unwrap_or(root);
